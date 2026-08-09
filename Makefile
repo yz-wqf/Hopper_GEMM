@@ -24,7 +24,10 @@ CHECK   := check_all check_fp64 check_large
 PERF    := perf_all perf_table perf_cmp perf_prof smem_budget
 SAN     := san_sweep san_large
 PROBE   := probe_kmajor probe_mnmajor probe_mnmajor_kadv
-CUTFLAGS:= -std=c++17 -I$(CUTLASS)/include -I$(CUTLASS)/tools/util/include --expt-relaxed-constexpr
+# -DNDEBUG is REQUIRED, not cosmetic: without it CUTLASS's device asserts block inlining and
+# ptxas serializes the wgmma pipeline (warning C7510), costing ~10-100% depending on shape.
+CUTFLAGS:= -std=c++17 -I$(CUTLASS)/include -I$(CUTLASS)/tools/util/include \
+           --expt-relaxed-constexpr -DNDEBUG
 
 ALL := $(CHECK) $(PERF) $(SAN) $(PROBE)
 

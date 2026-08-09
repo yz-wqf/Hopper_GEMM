@@ -30,3 +30,24 @@ three_way
 .idea/
 *.swp
 .DS_Store
+
+# Scratch probes from the CUTLASS comparison and the perf root-cause investigation
+# (OPTIMIZATION_REPORT.md sections 12-14). Throwaway experiments, both binaries and
+# sources -- unlike the probe_*/san_*/perf_* files, these are not part of the suite.
+*_tmp
+*_tmp.cu
+bench_u_*
+bench_w_*
+sass_*
+tw_*
+fill_s*
+one_BASE
+one_HOIST
+check_BASE
+check_HOIST
+check_def
+check_off
+
+# Shadowed third-party headers used for intervention experiments; the real checkout
+# is pointed at by $(CUTLASS) and is never modified.
+cutlass_patch/

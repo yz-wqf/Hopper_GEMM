@@ -33,8 +33,10 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 9 | Epilogue v3: TMA store | **+6.7%** at small K |
 | 10 | Tile dispatch (template on `BM`,`BN`) | **1024³: 0.69× → 1.04×** |
 | 11 | Per-shape `GROUP_M` policy | **+2…8%** on 6 shapes |
-| 12 | Cross-check vs tuned CUTLASS 4.7 | **1.04–1.33×** ahead on all 27 supported shapes |
-| — | **Final** | **17/31 shapes ≥1.00× cuBLAS**, 27 at ≥0.96×, 80–87% of peak |
+| 12 | Cross-check vs tuned CUTLASS 4.7 | ≥ on **20 of 27**; typical **1.01–1.22×** |
+| 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
+| 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
+| — | **Final** | **20/31 shapes ≥1.00× cuBLAS**, 27 at ≥0.96×, 80–92% of peak |
 
 ---
 
@@ -414,29 +416,112 @@ After step 7, a decomposition (a build with the epilogue suppressed at runtime) 
 epilogue was **the entire remaining gap**: our mainloop alone was 1.7–9.6% *faster* than
 cuBLAS's whole kernel, at 92–93% of peak.
 
-The cause is the `wgmma` accumulator layout. For a fixed `(g, j/2)`, a warp's 32 lanes cover
-**8 rows** (`lane/4`) contributing only **16 contiguous bytes** each (`2*(lane%4)` plus the
-`j%2` pair) — eight fragments, `N*2` bytes apart, against a 32-byte sector granularity. Every
-fragment half-fills a sector:
+### The wgmma accumulator layout
+
+To understand why the naive epilogue wastes bandwidth, first understand how wgmma distributes
+output elements across threads. The instruction `wgmma.m64nBNk16.f32.f16.f16` computes a
+64×BN output tile and spreads it across the 128 threads of one consumer warpgroup (4 warps ×
+32 lanes). Each thread therefore holds `64×BN / 128 = BN/2` fp32 accumulator registers, named
+`d[0]` through `d[BN/2 - 1]`.
+
+The mapping from register index `i` and thread identity `(warp w, lane l)` to output
+`(row, col)` is:
 
 ```
- ONE store instruction, 32 lanes.   row = …+ lane/4      (changes every 4 lanes)
-                                    col = …+ 2*(lane%4)  (4 lanes span 8 halves = 16 B)
+  row = 16*w + (l/4) + 8*h       where h = (i%4)/2  ∈ {0, 1}
+  col = 8*g  + 2*b  + (i%2)      where g = i/4,  b = l%4
+```
+
+Two indices do all the structural work:
+
+- **`g = i/4`** — the *column group*: which 8-column slab of the tile this register belongs
+  to.  Registers `d[4g], d[4g+1], d[4g+2], d[4g+3]` all land in column group `g`, covering
+  cols `8g .. 8g+7`.  `g` runs from 0 to BN/8−1.
+
+- **`b = l%4`** — the *column offset within the group*: which pair of columns inside the
+  8-column slab this lane contributes.  `b` ∈ {0,1,2,3} → columns `8g+2b` and `8g+2b+1`.
+
+And for rows:
+- `l/4` ∈ {0..7}: within one warp, 8 groups of 4 lanes each own a distinct row of the tile.
+- `h` ∈ {0,1}: each thread covers 2 rows, 8 rows apart (the register pair d[4g+0]/d[4g+1]
+  belongs to `h=0`, the pair d[4g+2]/d[4g+3] to `h=1`).
+
+Laid out as a table for one warp (w=0), one column group (g=0), h=0 — showing which lane owns
+which output element:
+
+```
+ Tile columns:    0   1   2   3   4   5   6   7        (group g=0, cols 8g .. 8g+7)
+                ┌───┬───┬───┬───┬───┬───┬───┬───┐
+ tile row 0     │L0 │L0 │L1 │L1 │L2 │L2 │L3 │L3 │   L0  = lane 0 (b=0)
+                └───┴───┴───┴───┴───┴───┴───┴───┘   L1  = lane 1 (b=1)
+ tile row 1     │L4 │L4 │L5 │L5 │L6 │L6 │L7 │L7 │   L2  = lane 2 (b=2)
+                └───┴───┴───┴───┴───┴───┴───┴───┘   L3  = lane 3 (b=3)
+ tile row 2     │L8 │L8 │L9 │L9 │L10│L10│L11│L11│   (lanes 4-7 own row 1, etc.)
+                └───┴───┴───┴───┴───┴───┴───┴───┘
+     ⋮
+ tile row 7     │L28│L28│L29│L29│L30│L30│L31│L31│
+                └───┴───┴───┴───┴───┴───┴───┴───┘
+```
+
+Every lane owns a 2-wide strip across 2 rows (h=0 and h=1) of one column group. The same
+pattern repeats for every column group g=1,2,…,BN/8−1, with each lane's strip shifting right
+by 8 columns.
+
+### Why a straight store wastes 50%
+
+Global memory is accessed in **32-byte sectors**. For BN=256 and the element's column
+`col = 8g + 2b`, the 32 bytes of one sector span 16 consecutive half-precision elements
+(32 B / 2 B per half = 16 elements = cols `16t .. 16t+15` for some tile offset `t`).
+
+When we store group g without any reordering, a single warp issues 32 stores simultaneously —
+one `half2` (4 B) per lane. In one row (say row 0), only 4 lanes (b=0..3, i.e. lanes 0–3)
+contribute:
+
+```
+ Straight store of group g, row 0 of warp 0 only (4 lanes, 4 bytes each):
+
+  col:  8g+0 8g+1 8g+2 8g+3 8g+4 8g+5 8g+6 8g+7 ║ 8g+8 8g+9 … 8g+15
+        ┌────┬────┬────┬────┬────┬────┬────┬────╫────────────────────┐
+        │ b=0│ b=0│ b=1│ b=1│ b=2│ b=2│ b=3│ b=3║  (empty — belongs ││
+        └────┴────┴────┴────┴────┴────┴────┴────╫──  to group g+1)  ┘
+        └──────── 16 B written ─────────────────╨─ 16 B untouched ──┘
+        └────────────────── 32 B = one sector ──────────────────────┘
+                               50% fill
+```
+
+The other 32 lanes (rows 1–7) are doing the same thing, each touching a different sector N×2
+bytes away in global memory:
+
+```
+ ONE store instruction, 32 lanes.   row = 16w + l/4   (changes every 4 lanes)
+                                    col = 8g + 2b      (b = l%4, 4 lanes span 8 halves = 16 B)
 
    row 0  [16B]·······································   lanes  0- 3   bytes     0..15
    row 1  ·······[16B]································   lanes  4- 7   bytes 16384..16399
    row 2  ··············[16B]·························   lanes  8-11   bytes 32768..32783
    row 3  ·····················[16B]··················   lanes 12-15
-    ⋮                                                     (8 fragments, N*2 = 16 KB apart)
+    ⋮                                                     (8 sectors, N×2 = 16 KB apart)
    row 7  ····································[16B]···   lanes 28-31
 
    128 useful bytes scattered over 8 sectors = 256 B of sector traffic ⇒ 50% wasted
 ```
 
-The missing half of each sector is the *next* g iteration (cols +8..+15) — the data exists, but
-in a different instruction, because adjacent columns of one row live in different lanes. So the
-fix is a **lane exchange**, not a wider store. Lanes `b` and `b^1` swap one of their two
-column-pairs across `g` and `g+1`:
+The missing 16 bytes of each sector are the elements from **column group g+1** (cols
+`8g+8..8g+15`). Those elements exist right now in the same warp's registers — but under the
+accumulator layout they belong to the *next* loop iteration (group g+1), in a different
+`d[i]`. The data is present; it just lives in the wrong register of the wrong lane.
+
+### Why a lane exchange (not a wider store) is the right fix
+
+A 4-wide store (`uint2`, 8 B per lane) over the same layout would still write only half a
+sector: each lane would store cols `8g+2b` and `8g+2b+1` plus `8g+2b+2` and `8g+2b+3` — but
+`8g+2b+2` is `b+1`'s territory, not data this lane holds. The problem is not the vector width;
+it is that **adjacent columns of one row belong to adjacent lanes**, not adjacent registers of
+the same lane.
+
+The fix is a **lane exchange**: before storing, lanes `b` and `b^1` (i.e. 0↔1 and 2↔3) swap
+column-pairs across groups g and g+1, so each lane ends up with 4 contiguous columns — one
+full `uint2` worth of a single row, covering its 8-byte share of the 32-byte sector.
 
 ```
  One __shfl_xor between lanes b and b^1, swapping one column-pair across g and g+1:
@@ -449,6 +534,37 @@ column-pairs across `g` and `g+1`:
 ```
 
 Each lane now holds 4 contiguous halves (8 B) and the quad tiles **one full 32-byte sector**.
+
+```
+ Thread index → global memory layout after exchange
+ (one row, one (g, g+1) pair; b = lane%4; c# = column offset from tile base):
+
+ BEFORE exchange — each b holds two non-contiguous half-pairs, 8 columns apart:
+
+   b=0  regs: ┌ a0=c0   a1=c1  ┐   ┌ e0=c8   e1=c9  ┐
+   b=1  regs: ┌ a0=c2   a1=c3  ┐   ┌ e0=c10  e1=c11 ┐
+   b=2  regs: ┌ a0=c4   a1=c5  ┐   ┌ e0=c12  e1=c13 ┐
+   b=3  regs: ┌ a0=c6   a1=c7  ┐   ┌ e0=c14  e1=c15 ┐
+               └─── group g ───┘   └─── group g+1 ───┘
+
+ __shfl_xor(mask=1): b ↔ b^1  (0↔1, 2↔3)
+   even b sends its e-pair, receives partner's a-pair:
+   b=0 ──sends(c8, c9 )──► b=1     b=0 ◄──receives(c2, c3 )── b=1
+   b=2 ──sends(c12,c13)──► b=3     b=2 ◄──receives(c6, c7 )── b=3
+
+ AFTER exchange — each b holds 4 contiguous halves → one uint2 store (8 B):
+
+   b=0  regs: [ c0  c1  c2  c3  ]  ──► uint2 store  ──► gmem cols  0 .. 3
+   b=2  regs: [ c4  c5  c6  c7  ]  ──► uint2 store  ──► gmem cols  4 .. 7
+   b=1  regs: [ c8  c9  c10 c11 ]  ──► uint2 store  ──► gmem cols  8 ..11
+   b=3  regs: [ c12 c13 c14 c15 ]  ──► uint2 store  ──► gmem cols 12 ..15
+
+ Global memory row (32 bytes = one L2 sector, one transaction):
+
+  col:   0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+        [════════ b=0 ════════][════════ b=2 ════════][════════ b=1 ════════][════════ b=3 ════════]
+         └──────────────────────────── 32 B, one full sector ──────────────────────────────────────┘
+```
 
 ```cpp
 const float a0 = alpha * d[i0], a1 = alpha * d[i0 + 1];   // my g   pair
@@ -481,7 +597,7 @@ reaches a full sector, so the extra work buys nothing.
 
 | shape | before | after | epilogue share |
 |---|---|---|---|
-| 8192×8192×**2048** | 657 TF | **796** (+21%) | 27.5% → **12.2%** |
+| 8192×8192×**2048** | 657 TF | **796** (+21%) | 27.5% → **13.1%** |
 | 4096³ | 749 | **836** (+12%) | 16.8% → **7.1%** |
 | 16384×8192×4096 | 730 | **791** (+8%) | 12.8% → **5.5%** |
 | 8192³ | 752 | **813** (+8%) | 10.0% → **2.7%** |
@@ -657,7 +773,8 @@ because a narrower tile is ~1.2x slower whenever the wider one has enough work.
 | 1024x1023x1024 | 75 | **133** | 1.05x -> **1.88x** |
 | 4096x512x4096 | 398 | **529** | 0.58x -> 0.75x |
 
-Overall **19 of 31 shapes at >=1.00x cuBLAS** (from 16), 26 at >=0.96x.
+Overall **19 of 31 shapes at >=1.00x cuBLAS** (from 16), 26 at >=0.96x -- the state *after
+this step*; sections 13-14 come later and the shipped figures are under Final performance.
 
 ### A deadlock this introduced
 
@@ -763,113 +880,228 @@ that times the first call. `solve()` uses the heuristics; `launch_tuned()` is op
 
 ## 12. Cross-check against CUTLASS
 
-The hand-written kernel builds warp specialization, the TMA pipeline, cluster multicast and
-the TMA-store epilogue by hand. `mma_half_cutlass.cu` builds the same thing from CUTLASS 4.7
-`CollectiveBuilder` primitives, with an identical `solve()` contract, as an independent check
-that the hand-written machinery is worth its complexity.
+`mma_half_cutlass.cu` builds the same contract from CUTLASS 4.7 `CollectiveBuilder`
+primitives, as an independent check on whether the hand-written machinery earns its
+complexity.
 
-### Tuning CUTLASS before comparing
+### The build flag that invalidated the first comparison
 
-CUTLASS's device API fixes the tile per instantiation -- there is **no runtime tile
-heuristic** (that is what its offline profiler is for). Comparing our per-shape dispatcher
-against a single fixed CUTLASS tile would measure our dispatcher, not the kernels. So the
-tile, cluster and kernel schedule were swept, 21 configurations over two shapes:
+**CUTLASS must be compiled with `-DNDEBUG`.** Without it, its device-side asserts block
+inlining; ptxas then cannot keep the wgmma group open across the resulting call boundary and
+emits warning **C7510**. The SASS difference is stark -- at an identical 128x64x64 tile:
+
+```
+  OURS                                CUTLASS built WITHOUT -DNDEBUG
+  WARPGROUP.ARRIVE                    WARPGROUP.ARRIVE
+  HGMMA.64x64x16.F32  x4              HGMMA.64x64x16.F32  x1
+  WARPGROUP.DEPBAR.LE gsb0, 0x1       WARPGROUP.DEPBAR.LE gsb0, 0x0
+                      ^ 1 group in                        ^ FULLY DRAINED
+                        flight                              after every wgmma
+```
+
+Four wgmma per commit group with one group in flight, versus one wgmma per group with a full
+drain between each -- no overlap at all. Cost:
+
+| | without `-DNDEBUG` | with |
+|---|---|---|
+| 4096³ | 776 | **869** |
+| 1024³ | 131 | **289** |
+
+I built it wrong, measured a 1.3x mainloop advantage that was mostly my own flag error, and
+propagated it through a tile sweep, a K-scaling analysis and a written conclusion -- **while
+having already quoted the C7510 warning that explained it**. A compiler warning naming the
+exact mechanism is not background noise.
+
+### Tuning
+
+CUTLASS's device API fixes the tile per instantiation; there is no runtime tile heuristic.
+Comparing our per-shape dispatcher against one fixed CUTLASS tile would measure our
+dispatcher, so tile x cluster x schedule was swept (all figures with `-DNDEBUG`):
 
 | config | 1024³ | 4096³ |
 |---|---|---|
-| 128×256×64 c2×1 coop *(baseline)* | 131 | **776** |
-| 128×256×64 c1×2 coop | 133 | 786 |
-| 256×128×64 c2×1 coop | 129 | 744 |
-| 128×128×64 c1×1 coop | 191 | 641 |
-| 128×128×128 c1×1 coop | 202 | 541 |
-| 128×64×64 c1×1 coop | 227 | 374 |
-| **128×64×128 c1×1 coop** | **248** | 376 |
-| 64×128×64 c1×1 ping | 204 | 385 |
-| 64×64×64 c1×1 ping | 162 | 245 |
-| 128×32×64 c1×1 coop | 160 | 200 |
-| 128×256×128 c2×1 coop | 98 | 428 |
-| 256×256×64 c2×1 coop | **7** | **33** |
+| 128x256x64 c2x1 | 143 | **857** |
+| 128x256x64 c1x2 | 146 | 869 |
+| **128x64x64 c1x1** | **289** | 374 |
+| 128x64x128 c1x1 | 285 | 382 |
+| 128x128x128 c1x1 | 225 | 579 |
+| 64x64x64 c1x1 ping | 213 | 300 |
+| 256x256x64 c2x1 | **7** | **34** |
 
-Three things fall out:
+A second overfit, caught late: `c1x2` looked 1.4% better than `c2x1` at 4096³ and shipped on
+that basis -- then measured **1.6x worse** at 16384³ (429 vs 693). Same failure mode as the
+first GROUP_M threshold: tuned on one shape, generalised. Reverted to `c2x1`.
 
-- **1024³ improved 1.83x** (131 -> 240 in the final build) from `128×64×128 c1×1`.
-- **4096³ could not be improved.** Nothing beat the baseline; the one nominal winner
-  (c1×2 at 786 vs 776) is 1.3%, inside the noise band, so it was not taken.
-- Small and large want *opposite* tiles, sharply: `128×64×128` is 1.83x better at 1024³ and
-  2.1x worse at 4096³. CUTLASS hits the same starvation wall step 10 describes.
+`256x256x64` collapsing to 7 / 34 TFLOPS is worth flagging separately: `can_implement`
+accepts it, so it builds and runs while being ~100x slow. A config sweep needs a sanity floor,
+not just a success check.
 
-`256×256×64` collapsing to 7 / 33 TFLOPS is worth flagging: `can_implement` accepts it, so it
-builds and runs while being ~100x slow -- almost certainly a shared-memory overrun forcing a
-1-stage pipeline. A configuration sweep needs a sanity floor, not just a success check.
+### Alignment
 
-### Two traps in the CUTLASS build
-
-**`EpilogueScheduleAuto` selects `DefaultEpilogue`, not the TMA one.** Measured 35% slower
-(572 vs 774 TFLOPS at 4096³). Pairing the cooperative mainloop with an explicit
-`TmaWarpSpecializedCooperative` epilogue -- what CUTLASS's own examples do -- is what the
-comparison uses. `-DCUTLASS_EPI_AUTO` reproduces the slow variant.
-
-**CUTLASS validates alignment against the problem *extent*, not the leading dimension.** A
-first attempt padded the *stride* of ragged operands, as `mma_half.cu` does; `can_implement`
-rejected all 19 such shapes and, because the return value was ignored, C was silently left
-untouched -- 19 failures all reporting `rel_l2 ≈ 1.0`. Supporting them properly means running
-a zero-padded *extent* and copying back, i.e. more work than the kernel under test performs,
-so those shapes are skipped instead. `mma_half.cu` has no such restriction: TMA zero-fills
-out-of-range elements, so it runs ragged shapes in place.
+CUTLASS validates TMA alignment against the problem **extent**, not the leading dimension, so
+ragged shapes cannot be fixed by widening a stride -- they would need a zero-padded extent and
+a copy back, i.e. more work than the kernel under test performs. Those four shapes are skipped
+(`n/a`). `mma_half.cu` has no such restriction: TMA zero-fills out-of-range elements, so it
+runs them in place.
 
 ### Result
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **503** | n/a | 145 | — | **3.47×** |
-| 4095×4095×4095 | **437** | n/a | 154 | — | **2.83×** |
-| 2k×2047×2k | **309** | n/a | 147 | — | **2.10×** |
-| 1k×1023×1k | **137** | n/a | 71 | — | **1.93×** |
-| 4k×4k×8k | **901** | 806 | 824 | **1.12×** | **1.09×** |
-| 8k×8k×16k | **858** | 783 | 788 | **1.10×** | **1.09×** |
-| 8k×4k×8k | **912** | 707 | 837 | **1.29×** | **1.09×** |
-| 8k×8k×4k | **890** | 709 | 825 | **1.26×** | **1.08×** |
-| 8k×8k×2k | **840** | 688 | 780 | **1.22×** | **1.08×** |
-| 4k×8k×8k | **911** | 708 | 851 | **1.29×** | **1.07×** |
-| 16k×16k×16k | **845** | 675 | 806 | **1.25×** | **1.05×** |
-| 16k×8k×4k | **823** | 726 | 787 | **1.13×** | **1.05×** |
-| 4k×8k×128 | **279** | 235 | 268 | **1.19×** | **1.04×** |
-| 1k×1k×1k | **317** | 240 | 306 | **1.32×** | **1.04×** |
-| 16k×8k×128 | **312** | 263 | 302 | **1.19×** | **1.03×** |
-| 32k×8k×2k | **813** | 720 | 791 | **1.13×** | **1.03×** |
-| 8k×8k×8k | **812** | 760 | 795 | **1.07×** | **1.02×** |
-| 4k×8k×512 | 609 | 514 | 611 | **1.18×** | 1.00× |
-| 4k×4k×4k | 865 | 774 | 874 | **1.12×** | 0.99× |
-| 4k×8k×256 | 463 | 367 | 469 | **1.26×** | 0.99× |
-| 8k×1k×8k | 878 | 795 | 892 | **1.10×** | 0.98× |
-| 8k×8k×128 | 283 | 247 | 289 | **1.14×** | 0.98× |
-| 4k×4k×1k | 693 | 614 | 708 | **1.13×** | 0.98× |
-| 4k×8k×1k | 733 | 642 | 753 | **1.14×** | 0.97× |
-| 8k×8k×1k | 758 | 652 | 780 | **1.16×** | 0.97× |
-| 16k×4k×8k | 825 | 758 | 851 | **1.09×** | 0.97× |
-| 384×2k×2k | 338 | 254 | 350 | **1.33×** | 0.97× |
-| 3000×1000×2000 | 460 | 432 | 493 | **1.06×** | 0.93× |
-| 2k×2k×2k | 672 | 622 | 726 | **1.08×** | 0.93× |
-| 2k×2k×512 | 362 | 348 | 428 | **1.04×** | 0.85× |
-| 4k×512×4k | 573 | 438 | 696 | **1.31×** | 0.82× |
+| 4k×4095×4k | **500** | n/a | 145 | — | **3.45×** |
+| 4095×4095×4095 | **436** | n/a | 156 | — | **2.79×** |
+| 2k×2047×2k | **309** | n/a | 146 | — | **2.12×** |
+| 1k×1023×1k | **138** | n/a | 71 | — | **1.93×** |
+| 8k×4k×8k | **912** | 781 | 803 | **1.17×** | **1.14×** |
+| 4k×8k×8k | **911** | 773 | 803 | **1.18×** | **1.13×** |
+| 4k×4k×8k | **902** | 897 | 796 | **1.01×** | **1.13×** |
+| 8k×8k×4k | **891** | 750 | 787 | **1.19×** | **1.13×** |
+| 8k×8k×2k | **842** | 779 | 765 | **1.08×** | **1.10×** |
+| 8k×8k×8k | **862** | 814 | 788 | **1.06×** | **1.09×** |
+| 1k×1k×1k | **325** | 290 | 304 | **1.12×** | **1.07×** |
+| 8k×8k×128 | **305** | 285 | 288 | **1.07×** | **1.06×** |
+| 8k×8k×16k | **832** | 838 | 792 | 0.99× | **1.05×** |
+| 16k×16k×16k | **845** | 695 | 806 | **1.22×** | **1.05×** |
+| 4k×8k×128 | **283** | 262 | 271 | **1.08×** | **1.05×** |
+| 16k×4k×8k | **824** | 806 | 789 | **1.02×** | **1.04×** |
+| 16k×8k×128 | **314** | 301 | 303 | **1.04×** | **1.04×** |
+| 16k×8k×4k | **804** | 783 | 792 | **1.03×** | **1.02×** |
+| 4k×8k×256 | **473** | 412 | 469 | **1.15×** | **1.01×** |
+| 32k×8k×2k | **792** | 773 | 792 | **1.02×** | **1.00×** |
+| 4k×8k×512 | 610 | 574 | 610 | **1.06×** | 1.00× |
+| 4k×4k×4k | 863 | 858 | 870 | **1.01×** | 0.99× |
+| 8k×1k×8k | 886 | 888 | 900 | 1.00× | 0.98× |
+| 4k×4k×1k | 689 | 674 | 704 | **1.02×** | 0.98× |
+| 4k×8k×1k | 735 | 715 | 754 | **1.03×** | 0.97× |
+| 8k×8k×1k | 761 | 731 | 782 | **1.04×** | 0.97× |
+| 384×2k×2k | 336 | 338 | 352 | 1.00× | 0.96× |
+| 2k×2k×2k | 674 | 686 | 725 | 0.98× | 0.93× |
+| 3000×1000×2000 | 459 | 462 | 500 | 0.99× | 0.92× |
+| 2k×2k×512 | 363 | 384 | 425 | 0.95× | 0.85× |
+| 4k×512×4k | 532 | 557 | 694 | 0.95× | 0.77× |
 
-**Ours is ahead on all 27 shapes CUTLASS supports (1.04–1.33x)**, and CUTLASS is bit-exact
-against cuBLAS on every one of them. After tuning, the margin is a fairly uniform 1.05–1.30x
-on large shapes -- a mainloop/epilogue difference rather than a tiling artifact, which is the
-comparison worth having.
+**31 shapes — ours ≥ cuBLAS on 20; ours ≥ CUTLASS on 20 of 27 supported.**
+
+Typical margin on large shapes is **1.01–1.22x**. CUTLASS wins the small and thin-K end
+(`2k×2k×512`, `2k×2k×2k`, `3000×1000×2000`, `384×2k×2k`, `4k×512×4k`) -- section 14 explains
+why -- and is bit-exact against cuBLAS on every shape it runs.
+
+---
+
+## 13. Hoisting the wgmma descriptor out of the k16 loop
+
+Profiling the mainloop showed 13.4 SASS instructions between consecutive `wgmma` issues
+against CUTLASS's 7.9. The gap was the descriptor: the inner k16 loop called `make_desc()`
+and `make_desc_mn()` per issue, rebuilding the whole 64-bit field each time.
+
+Only bits `[13:0]` (`addr>>4`) vary with the k16 step, and the step is a compile-time
+constant, so the rebuild is unnecessary:
+
+```
+  make_desc(a_base + ks*32)       ==  make_desc(a_base)    + ks*2
+  make_desc_mn(b_base + ks*2048)  ==  make_desc_mn(b_base) + ks*(MN_K_STRIDE/16)
+```
+
+One base descriptor per operand per k-tile, plus an immediate add per issue. SASS confirms
+it -- the base lives in a uniform register pair and each issue is a single 64-bit add:
+
+```
+  UIADD3.64 UR26, UR22, 0x80,  URZ
+  HGMMA.64x256x16.F32 R24, gdesc[UR24].tnspB, R24
+  UIADD3.64 UR26, UR22, 0x100, URZ
+  HGMMA ...
+```
+
+| BN=256 wgmma region | per-issue rebuild | hoisted |
+|---|---|---|
+| `ULOP3` (field construction) | 26 | **8** |
+| `USHF` (shifts) | 17 | **7** |
+| **`ULDC`** | **0** | **0** |
+| region size (instructions) | 214 | **159** |
+
+**Note what this deliberately does *not* do.** CUTLASS solves the same problem by keeping
+parameters in its 1280-byte `Params` block and re-reading them through `ULDC`, costing it
+2.25x the uniform constant loads and 3.3x the `imc_miss` stalls. Hoisting into registers is
+the good half of that idea without the constant traffic: whole-kernel `ULDC` is unchanged at
+142, and zero in the wgmma region either way. A descriptor contains a runtime shared-memory
+address, so it could not live in constant memory even if we wanted it to.
+
+Measured with interleaved A/B (5 pairs, medians), because the first non-interleaved run
+produced a **+6.2% phantom** on `16384x8192x4096` that became -0.7% once drift was cancelled:
+
+| shape | rebuild | hoisted | delta |
+|---|---|---|---|
+| 1024x1024x1024 | 320 | 325 | **+1.6%** |
+| 4096x8192x256 | 466 | 474 | **+1.7%** |
+| 2048x2048x512 | 361 | 363 | +0.6% |
+| 4096x4096x4096 | 862 | 863 | +0.1% |
+| large shapes (8k-16k) | -- | -- | inside +/-50-100 TF noise |
+
+The win concentrates where the mainloop is a large fraction of a short kernel and vanishes
+where the tensor pipe is already saturated. Correctness unchanged: 57 shapes, 0 failures,
+knob on and off. Default on; `-DCFG_HOIST_DESC=0` restores the rebuild.
+
+---
+
+## 14. Root cause of the shapes we still lose
+
+`2048x2048x512` is our worst result against CUTLASS. Both dispatchers select the *same*
+128x256x64 tile with a 2-CTA M-cluster, so this is not a tiling artifact.
+
+**The K-sweep separates fixed cost from per-iteration cost.** At fixed M=N=2048:
+
+| K | k-tiles | ours | CUTLASS | ratio | ours - CUTLASS |
+|---|---|---|---|---|---|
+| 128 | 2 | 125.3 | 138.9 | 0.90x | 0.84 us |
+| 512 | 8 | 360.6 | 385.6 | 0.94x | 0.77 us |
+| 2048 | 32 | 681.7 | 700.4 | 0.97x | 0.67 us |
+| 8192 | 128 | 807.2 | 807.4 | 1.00x | 0.02 us |
+
+The *ratio* converges but the *absolute* gap is flat at ~0.78 us across two decades of K --
+a fixed per-tile cost, the exact inverse of the 1024^3 case where the ratio is flat and the
+cost is per-iteration.
+
+**Scaling tiles-per-CTA localises it.** At fixed K=512:
+
+| M=N | tiles | tiles/CTA | ours | CUTLASS | delta |
+|---|---|---|---|---|---|
+| 2048 | 128 | 1.0 | 11.95 us | 11.16 us | **+0.79** |
+| 4096 | 512 | 3.9 | 31.80 us | 32.73 us | **-0.93** |
+| 8192 | 2048 | 15.5 | 105.62 us | 113.52 us | **-7.90** |
+
+The deficit does not scale with tiles -- it *reverses*. Fitting:
+
+```
+  delta  =  1.38 us  -  0.59 us x (tiles per CTA)          break-even ~2.3 tiles/CTA
+  predicted at 15.5 tiles/CTA: -7.81 us     measured: -7.90 us
+```
+
+**We carry a ~1.38 us fixed per-CTA startup cost against a ~0.59 us per-tile advantage.**
+That is the persistent design's trade: front-load work into the prologue, amortise it over
+many tiles. At exactly one wave there is nothing to amortise against.
+
+One constant predicts every shape CUTLASS beats us on: `384x2k x2k` (0.18 tiles/CTA),
+`2k x2k x512` (0.97), `2k x2k x2k` (0.97), `8k x1k x8k` (1.9) sit below 2.3; `4k^3` (3.9)
+and `8k^3` (15.5) sit above, and we win.
+
+Ruled out by intervention: pipeline fill (stages 3 vs 4 is a dead heat at short K) and TMA
+descriptor re-encoding per launch (0.140 us, 10% of the gap). **Not decomposed:** the
+remaining ~1.2 us -- candidates are first-stage TMA fill latency and per-CTA setup.
+
+**The actionable item:** the dispatcher already computes tile counts, so it could detect
+`tiles/CTA < ~2.3` and take a lighter path. Worth ~6% on the affected shapes, but blocked on
+decomposing that 1.2 us first -- fixing the wrong half would be another null result. The
+methodology is written up in the `gpu-perf-root-cause` skill.
 
 ---
 
 ## Final performance
 
-The measured table lives in **[`README.md`](README.md)** and in step 12 above — deliberately
-not repeated a third time here, because two copies of these numbers have already drifted apart
-once during this work.
-
-Summary: **17 of 31 shapes at ≥1.00× cuBLAS 12.9**, 27 at ≥0.96×, and **ahead of a tuned
-CUTLASS 4.7 on all 27 shapes CUTLASS supports (1.04–1.33×)**. Large shapes run 80–87% of the
-989.4 TFLOPS hardware peak; the best single figure is 4096³ at 87% and 8192×4096×8192 at
-912 TFLOPS.
+Summary: **20 of 31 shapes at ≥1.00× cuBLAS 12.9**, and **≥ a tuned CUTLASS 4.7 on 20 of the
+27 shapes CUTLASS supports**. Rows within ~1% are inside the run-to-run band; only ≥1.05×
+and ≤0.95× entries are decided. Large shapes run 80–92% of the
+989.4 TFLOPS hardware peak; the best single figure is 8192×4096×8192 at 912 TFLOPS (92.2%
+of peak), with 4096³ at 863 TFLOPS (87.2%).
 
 Regenerate with `make perf` (vs cuBLAS) and `make cutlass` (three-way).
 
@@ -921,16 +1153,26 @@ epilogue win it would have funded. Chunked staging into the existing 34.9 KB ins
 
 ## Known limitations
 
-1. **Small problems are grid-starved.** Anything producing <=64 tiles cannot fill 132 SMs.
-   Step 10's dispatcher already drops to the narrowest available tile (BN=128) for these,
-   worth 1.31x-1.75x, but 1024^3 is *still* only 64 tiles. Closing the rest needs BM=64 (one
-   consumer warpgroup) or split-K -- a third kernel shape, not a tuning knob.
-   Worst: 1024^3 at 0.69x, 384x2048x2048 at 0.71x, 4096x512x4096 at 0.77x.
+1. **Small problems are grid-starved.** Anything producing ≤64 tiles cannot fill 132 SMs.
+   Step 10's dispatcher drops to the narrowest available tile (BN=64, not BN=128) for these,
+   adding pipeline depth and doubling tile count; that was worth 1.31–1.83× and moved the
+   previously worst shapes off the list:
+
+   | shape | before step 10 | after step 10 (BN=64) |
+   |---|---|---|
+   | 1024³ | 0.69× | **1.04×** |
+   | 384×2048×2048 | 0.41× | **0.97×** |
+   | 1024×1023×1024 | 1.05× | **1.88×** |
+
+   Remaining open cases are smaller problems (≤32 tiles) or narrow-N shapes where the tile
+   dispatcher cannot help further. The step that would close those is BM=64 (one consumer
+   warpgroup, halving arithmetic intensity to double tile count) or split-K — neither has been
+   implemented. Worst remaining: 4096×512×4096 at 0.82×, 2048×2048×512 at 0.85×.
 2. **Short K is pipeline-fill-bound.** `2048x2048x512` (0.87x) has near-full occupancy at 128
    tiles, but K=512 is only 8 k-tiles against a 4-stage pipeline, so ~50% of the time is
    fill/drain. The BN=128 path's 6 stages make this *worse*, not better, which is why the
    dispatcher correctly selects the wide tile there.
-3. **`N % 8 != 0` runs at ~60% of aligned speed** (508 TF vs 871). Takes the shuffle epilogue
+3. **`N % 8 != 0` runs at ~58% of aligned speed** (500 TF vs 863). Takes the shuffle epilogue
    *and* a B restride. Still 2-3.4x faster than cuBLAS, which abandons its Hopper kernel for an
    sm_75 CUTLASS `align1` fallback -- but that is cuBLAS degrading, not us accelerating.
 4. **`beta != 0` uses the shuffle epilogue**, not TMA store -- a bulk store cannot

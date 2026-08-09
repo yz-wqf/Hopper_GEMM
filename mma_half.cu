@@ -113,6 +113,11 @@
 namespace h100_hgemm {
 
 // ------------------------------------------------------------------ tuning parameters
+// Hoist the wgmma descriptor build out of the k16 loop (see the mainloop). Default on;
+// -DCFG_HOIST_DESC=0 restores the per-issue rebuild for A/B comparison.
+#ifndef CFG_HOIST_DESC
+#define CFG_HOIST_DESC 1
+#endif
 #ifndef CFG_STAGES
 #define CFG_STAGES 4
 #endif
@@ -814,7 +819,7 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
   const uint32_t rank = (CLUSTER_M_ == 1) ? 0u : cta_rank_in_cluster();
 
   const int ctiles_m = tiles_m / CLUSTER_M_;
-  const int group_sz = cgroup_m * tiles_n;
+  const int group_sz = (cgroup_m > 0 ? cgroup_m : 1) * tiles_n;
   const int my_cluster = blockIdx.x / CLUSTER_M_;      // this cluster's slot
   const int num_clusters = gridDim.x / CLUSTER_M_;     // stride through the work list
 
@@ -986,6 +991,26 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
         const uint32_t b_base = smem_u32(sB + s * C_::B_STAGE);
 
         wgmma_fence();
+#if CFG_HOIST_DESC
+        // Hoist the descriptor build out of the k16 loop. Only bits [13:0] (addr>>4) vary
+        // with ks, and the step is a compile-time constant, so one base descriptor per
+        // operand plus an immediate add replaces a full field rebuild per issue:
+        //   make_desc(a_base + ks*32)      == make_desc(a_base)    + ks*2
+        //   make_desc_mn(b_base + ks*2048) == make_desc_mn(b_base) + ks*(MN_K_STRIDE/16)
+        const uint64_t da_base = make_desc(a_base);
+        const uint64_t db_base = make_desc_mn(b_base);
+#pragma unroll
+        for (int ks = 0; ks < BK / 16; ++ks) {
+          const uint64_t da = da_base + (uint64_t)(ks * 2);
+          const uint64_t db = db_base + (uint64_t)(ks * (MN_K_STRIDE / 16));
+          if constexpr (BN_ == 256)
+            wgmma_m64n256k16<1>(d, da, db);
+          else if constexpr (BN_ == 128)
+            wgmma_m64n128k16<1>(d, da, db);
+          else
+            wgmma_m64n64k16<1>(d, da, db);
+        }
+#else
 #pragma unroll
         for (int ks = 0; ks < BK / 16; ++ks) {
           // A is K-major: +16 halves along K == +32B. B is N-major: a k16 step crosses 16
@@ -1000,6 +1025,7 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
             wgmma_m64n64k16<1>(d, make_desc(a_base + ks * 32),
                                make_desc_mn(b_base + ks * MN_K_STRIDE));
         }
+#endif
         wgmma_commit();
 
         // Retire the *previous* group only, so this stage's math overlaps the next TMA.
@@ -1201,6 +1227,14 @@ bool launch_mainloop(const half *A, const half *B, half *C, int M, int N, int K,
     return n;
   }();
 #if defined(CFG_FORCE_BM) && defined(CFG_FORCE_BN)
+  // The policy below lives in the #else branch, so resolve the auto sentinel here too --
+  // passing group_m == 0 through would make group_sz zero and divide by zero in the decode.
+  if (group_m == 0) {
+    if (CFG_FORCE_BN == 64)  group_m = 2;
+    else if (K <= 512)       group_m = 4;
+    else if (N <= 512)       group_m = 16;
+    else                     group_m = GROUP_M;
+  }
   return launch_tile<CFG_FORCE_BM, CFG_FORCE_BN>(A, B, C, M, N, K, lda, ldb, alpha, beta, stream,
                                                  sm_count, group_m);
 #else

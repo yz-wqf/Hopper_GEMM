@@ -5,14 +5,13 @@
 Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specialization +
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
-**17 of 31 shapes at ≥1.00× cuBLAS 12.9, and ahead of a tuned CUTLASS 4.7 on all 27 shapes
-CUTLASS supports (1.04–1.33×).** 80–87% of the 989.4 TFLOPS hardware peak on large shapes.
-Full table below.
+**20 of 31 shapes at ≥1.00× cuBLAS 12.9, and ≥ a tuned CUTLASS 4.7 on 20 of the 27 shapes
+CUTLASS supports.** 80–92% of the 989.4 TFLOPS hardware peak on large shapes. Full table below.
 
 | document | |
 |---|---|
-| **[`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md)** | how it was built: 11 steps, each with the code, a diagram, and the measurement — plus what was tried and rejected |
-| [`SKILL.md`](../.claude/skills/gemm-hopper-optimization/SKILL.md) | the transferable method, as a reusable skill |
+| **[`OPTIMIZATION_REPORT.md`](OPTIMIZATION_REPORT.md)** | how it was built: 12 optimization steps, each with the code, a diagram, and the measurement — plus the CUTLASS cross-check (§12), the root-cause analysis of the shapes we lose (§14), and what was tried and rejected |
+| **[`SKILL.md`](SKILL.md)** | the transferable method, as a reusable skill — installable at `.claude/skills/gemm-hopper-optimization/` |
 
 ---
 
@@ -37,54 +36,66 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **503** | n/a | 145 | — | **3.47×** |
-| 4095×4095×4095 | **437** | n/a | 154 | — | **2.83×** |
-| 2k×2047×2k | **309** | n/a | 147 | — | **2.10×** |
-| 1k×1023×1k | **137** | n/a | 71 | — | **1.93×** |
-| 4k×4k×8k | **901** | 806 | 824 | **1.12×** | **1.09×** |
-| 8k×8k×16k | **858** | 783 | 788 | **1.10×** | **1.09×** |
-| 8k×4k×8k | **912** | 707 | 837 | **1.29×** | **1.09×** |
-| 8k×8k×4k | **890** | 709 | 825 | **1.26×** | **1.08×** |
-| 8k×8k×2k | **840** | 688 | 780 | **1.22×** | **1.08×** |
-| 4k×8k×8k | **911** | 708 | 851 | **1.29×** | **1.07×** |
-| 16k×16k×16k | **845** | 675 | 806 | **1.25×** | **1.05×** |
-| 16k×8k×4k | **823** | 726 | 787 | **1.13×** | **1.05×** |
-| 4k×8k×128 | **279** | 235 | 268 | **1.19×** | **1.04×** |
-| 1k×1k×1k | **317** | 240 | 306 | **1.32×** | **1.04×** |
-| 16k×8k×128 | **312** | 263 | 302 | **1.19×** | **1.03×** |
-| 32k×8k×2k | **813** | 720 | 791 | **1.13×** | **1.03×** |
-| 8k×8k×8k | **812** | 760 | 795 | **1.07×** | **1.02×** |
-| 4k×8k×512 | 609 | 514 | 611 | **1.18×** | 1.00× |
-| 4k×4k×4k | 865 | 774 | 874 | **1.12×** | 0.99× |
-| 4k×8k×256 | 463 | 367 | 469 | **1.26×** | 0.99× |
-| 8k×1k×8k | 878 | 795 | 892 | **1.10×** | 0.98× |
-| 8k×8k×128 | 283 | 247 | 289 | **1.14×** | 0.98× |
-| 4k×4k×1k | 693 | 614 | 708 | **1.13×** | 0.98× |
-| 4k×8k×1k | 733 | 642 | 753 | **1.14×** | 0.97× |
-| 8k×8k×1k | 758 | 652 | 780 | **1.16×** | 0.97× |
-| 16k×4k×8k | 825 | 758 | 851 | **1.09×** | 0.97× |
-| 384×2k×2k | 338 | 254 | 350 | **1.33×** | 0.97× |
-| 3000×1000×2000 | 460 | 432 | 493 | **1.06×** | 0.93× |
-| 2k×2k×2k | 672 | 622 | 726 | **1.08×** | 0.93× |
-| 2k×2k×512 | 362 | 348 | 428 | **1.04×** | 0.85× |
-| 4k×512×4k | 573 | 438 | 696 | **1.31×** | 0.82× |
+| 4k×4095×4k | **500** | n/a | 145 | — | **3.45×** |
+| 4095×4095×4095 | **436** | n/a | 156 | — | **2.79×** |
+| 2k×2047×2k | **309** | n/a | 146 | — | **2.12×** |
+| 1k×1023×1k | **138** | n/a | 71 | — | **1.93×** |
+| 8k×4k×8k | **912** | 781 | 803 | **1.17×** | **1.14×** |
+| 4k×8k×8k | **911** | 773 | 803 | **1.18×** | **1.13×** |
+| 4k×4k×8k | **902** | 897 | 796 | **1.01×** | **1.13×** |
+| 8k×8k×4k | **891** | 750 | 787 | **1.19×** | **1.13×** |
+| 8k×8k×2k | **842** | 779 | 765 | **1.08×** | **1.10×** |
+| 8k×8k×8k | **862** | 814 | 788 | **1.06×** | **1.09×** |
+| 1k×1k×1k | **325** | 290 | 304 | **1.12×** | **1.07×** |
+| 8k×8k×128 | **305** | 285 | 288 | **1.07×** | **1.06×** |
+| 8k×8k×16k | **832** | 838 | 792 | 0.99× | **1.05×** |
+| 16k×16k×16k | **845** | 695 | 806 | **1.22×** | **1.05×** |
+| 4k×8k×128 | **283** | 262 | 271 | **1.08×** | **1.05×** |
+| 16k×4k×8k | **824** | 806 | 789 | **1.02×** | **1.04×** |
+| 16k×8k×128 | **314** | 301 | 303 | **1.04×** | **1.04×** |
+| 16k×8k×4k | **804** | 783 | 792 | **1.03×** | **1.02×** |
+| 4k×8k×256 | **473** | 412 | 469 | **1.15×** | **1.01×** |
+| 32k×8k×2k | **792** | 773 | 792 | **1.02×** | **1.00×** |
+| 4k×8k×512 | 610 | 574 | 610 | **1.06×** | 1.00× |
+| 4k×4k×4k | 863 | 858 | 870 | **1.01×** | 0.99× |
+| 8k×1k×8k | 886 | 888 | 900 | 1.00× | 0.98× |
+| 4k×4k×1k | 689 | 674 | 704 | **1.02×** | 0.98× |
+| 4k×8k×1k | 735 | 715 | 754 | **1.03×** | 0.97× |
+| 8k×8k×1k | 761 | 731 | 782 | **1.04×** | 0.97× |
+| 384×2k×2k | 336 | 338 | 352 | 1.00× | 0.96× |
+| 2k×2k×2k | 674 | 686 | 725 | 0.98× | 0.93× |
+| 3000×1000×2000 | 459 | 462 | 500 | 0.99× | 0.92× |
+| 2k×2k×512 | 363 | 384 | 425 | 0.95× | 0.85× |
+| 4k×512×4k | 532 | 557 | 694 | 0.95× | 0.77× |
 
+**31 shapes — ours ≥ cuBLAS on 20; ours ≥ CUTLASS on 20 of 27 supported.**
 
+Rows within ~1% of each other are inside the run-to-run band on this machine: large shapes
+drift ±50–100 TFLOPS between runs depending on clocks. Treat `0.99×`–`1.01×` as a tie and
+only the ≥1.05× and ≤0.95× entries as decided. The medians above are over 3 serial runs.
 
-Large shapes run **80–87% of the 989.4 TFLOPS** hardware peak.
+Large shapes run **80–92% of the 989.4 TFLOPS** hardware peak — best single figure is
+8192×4096×8192 at 912 TFLOPS (92.2% of peak), with 4096³ at 863 (87.2%).
 
 **On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
-runtime tile heuristic (that is what its offline profiler is for), so it gets the same two-rung
-dispatch ours has, using configurations found by sweeping 21 combinations of tile, cluster and
-kernel schedule. Before that tuning it sat at 131 TF on 1024³; after, 240. The residual
-1.05–1.30× on large shapes is a mainloop/epilogue difference, not a tiling artifact. CUTLASS is
-**bit-exact against cuBLAS** on every shape it runs.
+runtime tile heuristic (that is what its offline profiler is for) — so it gets the same two-rung
+dispatch ours has, with configurations chosen by sweeping tile × cluster × kernel schedule.
+
+**It must be built with `-DNDEBUG`** (the Makefile does). Without it, CUTLASS's device-side
+asserts block inlining, ptxas cannot keep the wgmma group open across the resulting call
+boundary (warning **C7510**), and the SASS fences and *fully drains* around every single
+`wgmma` instead of keeping one group in flight. That costs ~10% at 4096³ and ~2× at 1024³ —
+large enough to invert several rows of this table. CUTLASS is **bit-exact against cuBLAS** on
+every shape it runs.
 
 **Reading the extremes.** The top four rows are cuBLAS *losing*, not us winning: for
 `N % 8 != 0` it abandons its Hopper kernel for an sm_75 CUTLASS `align1` fallback (confirmed
-by nsys). We stay on the Hopper path by restriding B into scratch — but at 508 TF we are still
-40% below our own aligned throughput. The bottom rows are grid starvation: every shape below
-0.95× has ≤128 output tiles for 132 SMs.
+by nsys). We stay on the Hopper path by restriding B into scratch — but at 500 TF we are still
+42% below our own aligned throughput. The bottom rows are **not** simply "grid starvation", though every shape
+below 0.95× does have ≤128 output tiles for 132 SMs. Section 14 of the report pins it down:
+we carry a ~1.38 µs fixed per-CTA prologue against a ~0.59 µs per-tile advantage, so the
+break-even is ~2.3 tiles per CTA. Below that the persistent design has nothing to amortise
+its prologue against. That one constant predicts every shape CUTLASS wins.
 
 **Reading the middle.** cuBLAS drifts ~12% run-to-run here even with medians, so the ≥1.00×
 count moves ±2 between runs. The stable claim is *parity or better on large shapes*, not a
@@ -186,6 +197,7 @@ Compile-time, via `-D`:
 
 | macro | default | |
 |---|---|---|
+| `CFG_HOIST_DESC` | 1 | build the wgmma descriptor once per k-tile and reach each k16 issue with an immediate add, instead of rebuilding the 64-bit field per issue. Cuts the BN=256 wgmma region from 214 to 159 instructions; +1.6% at 1024³, +1.7% at 4k×8k×256, ~0 on large shapes. `0` restores the per-issue rebuild |
 | `CFG_STAGES` | 4 | pipeline depth for the BN=256 tile (BN=128 uses 6) |
 | `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤512`, and `N≤512` — worth 2–8% on 6 shapes |
 | `CFG_CLUSTER_M` | 2 | CTAs per cluster sharing a B tile; 1 disables multicast (−7.8%) |

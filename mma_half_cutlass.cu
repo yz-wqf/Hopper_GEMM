@@ -72,10 +72,17 @@ using EpiSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
 // tuning table in OPTIMIZATION_REPORT.md). CUTLASS's device API fixes the tile per
 // instantiation, so this is the equivalent of what its offline profiler produces.
 //
-//   1024^3 : 128x256x64 c2x1 -> 131 TF   128x64x128 c1x1 -> 248 TF   (1.89x)
-//   4096^3 : 128x256x64 c2x1 -> 776 TF   128x64x128 c1x1 -> 376 TF
+//   1024^3 : 128x256x64 -> 143 TF    128x64x64 c1x1 -> 289 TF   (2.02x)
+//   4096^3 : 128x256x64 c2x1 -> 857 TF  128x64x64 c1x1 -> 374 TF
+//  16384^3 : c2x1 -> 693 TF, c1x2 -> 429 TF (cluster choice matters more at scale)
 //
-// So the same starvation story as the hand-written kernel: one fixed tile cannot serve both.
+// Same starvation story as the hand-written kernel: one fixed tile cannot serve both.
+//
+// MUST BE BUILT WITH -DNDEBUG. Without it, CUTLASS's device-side asserts block inlining and
+// ptxas cannot keep the wgmma group open across the resulting call boundary (warning C7510).
+// The SASS then fences and *fully drains* around every single wgmma
+// (WARPGROUP.DEPBAR.LE gsb0, 0x0 after each HGMMA) instead of keeping one group in flight,
+// costing ~10% at 4096^3 and ~2x at 1024^3.
 template <class TileShape_, class ClusterShape_>
 struct Cfg {
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -95,8 +102,10 @@ struct Cfg {
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 };
 
+// Cluster 2x1, not 1x2: 1x2 measured 1.4% better at 4096^3 but 1.6x WORSE at 16384^3
+// (429 vs 693 TFLOPS). Tuning on one shape and generalising is how that nearly shipped.
 using Large = Cfg<Shape<_128, _256, _64>, Shape<_2, _1, _1>>;
-using Small = Cfg<Shape<_128, _64, _128>, Shape<_1, _1, _1>>;
+using Small = Cfg<Shape<_128, _64, _64>, Shape<_1, _1, _1>>;
 using Gemm = typename Large::Gemm;   // stride types are identical across configs
 
 using StrideA = typename Gemm::GemmKernel::StrideA;
