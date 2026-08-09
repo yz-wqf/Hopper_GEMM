@@ -836,21 +836,92 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
 
   // Decode a linear work index w into this CTA's (tile_m, tile_n).
   //
-  // The M dimension is tiled into groups of cgroup_m cluster-M rows each.
-  // Within a group, M is the fast index and N is the slow index:
+  // ── Group-M rasterization ────────────────────────────────────────────────
+  // The output tile grid is partitioned into row-bands called groups. Each
+  // group spans cgroup_m cluster-M rows and ALL tiles_n N-tile columns:
   //
-  //   w  →  gid (which group)  +  in_grp (position within group)
-  //                                  │
-  //                    ┌─────────────┴──────────────┐
-  //                    │                            │
-  //            tile_n = in_grp / gcm        M_off = in_grp % gcm   (fast)
-  //            (slow, outer)                         │
-  //                                   tile_m = (first_cm + M_off) * CLUSTER_M_ + rank
+  //   group_sz = cgroup_m × tiles_n    (total work indices per group)
   //
-  // Consecutive w values share the same tile_n → the same B tile [K×n] stays
-  // hot in L2 across all cgroup_m M-tiles in the group (L2-friendly reuse).
-  // CTAs in the same cluster decode the same w but differ in `rank`, so each
-  // cluster covers CLUSTER_M_ consecutive M-tiles from a single TMA multicast.
+  // Within a group, M is the FAST index and N is the SLOW index. This keeps
+  // the same B tile [K×n] hot in L2 across cgroup_m consecutive M-tiles:
+  //
+  //   w  →  gid    = w / group_sz         (which group)
+  //         in_grp = w mod group_sz        (position within the group)
+  //                        │
+  //           ┌────────────┴─────────────┐
+  //           │                          │
+  //   tile_n = in_grp / gcm         M_off = in_grp % gcm        (fast)
+  //   (slow, outer)                        │
+  //                          tile_m = (first_cm + M_off) * CLUSTER_M_ + rank
+  //
+  // Concrete example — cgroup_m=2, tiles_n=3, CLUSTER_M_=2, ctiles_m=5:
+  //
+  //   group_sz = 2 × 3 = 6
+  //
+  //        n=0     n=1     n=2        (tiles_n = 3 columns)
+  //      ┌───────┬───────┬───────┐
+  //  cm0 │  w=0  │  w=2  │  w=4  │ ─┐
+  //      ├───────┼───────┼───────┤  │ group 0  (6 work indices)
+  //  cm1 │  w=1  │  w=3  │  w=5  │ ─┘
+  //      ╞═══════╪═══════╪═══════╡
+  //  cm2 │  w=6  │  w=8  │  w=10 │ ─┐
+  //      ├───────┼───────┼───────┤  │ group 1
+  //  cm3 │  w=7  │  w=9  │  w=11 │ ─┘
+  //      ╞═══════╪═══════╪═══════╡
+  //  cm4 │  w=12 │  w=13 │  w=14 │ ── group 2 (partial, gcm=1; see below)
+  //      └───────┴───────┴───────┘
+  //
+  //  Traversal within group 0, rank=0  (first_cm=0, gcm=2):
+  //
+  //   w  in_grp  M_off  tile_n  tile_m   note
+  //   0    0       0      0       0
+  //   1    1       1      0       2     ← same N=0: B tile[K×0] stays in L2
+  //   2    2       0      1       0
+  //   3    3       1      1       2     ← same N=1: B tile[K×1] stays in L2
+  //   4    4       0      2       0
+  //   5    5       1      2       2     ← same N=2: B tile[K×2] stays in L2
+  //
+  // ── Boundary: last group may be partial (gcm < cgroup_m) ─────────────────
+  // gcm = min(ctiles_m - first_cm, cgroup_m) clamps the last group when
+  // ctiles_m is not a multiple of cgroup_m. With gcm=1 (group 2 above,
+  // only cm4 remains), M_off = in_grp % 1 = 0 always, so tile_m is fixed
+  // and only tile_n advances — the group degenerates to a single M-row:
+  //
+  //   w  in_grp  gcm  M_off  tile_n  tile_m
+  //  12    0      1     0      0       8    ← M fixed at cm4
+  //  13    1      1     0      1       8
+  //  14    2      1     0      2       8    ← only N advances
+  //
+  // ── Cluster layout (CLUSTER_M_ = 2) ─────────────────────────────────────
+  // A cluster holds CLUSTER_M_ CTAs. All decode the same w; only `rank`
+  // differs (0-based CTA index within the cluster). Let p = first_cm + M_off.
+  //
+  //  A [M × K]                      B [K × N]
+  //                                  tile_n*BN      (tile_n+1)*BN
+  //  p*2*BM ┌──────────────────┐          │               │
+  //         │     rank 0       │          ▼               ▼
+  //         │  tile_m = p*2+0  │    ┌──────────┬──────────┐
+  //         │  loads BM rows   │    │  rank 0  │  rank 1  │  ← each CTA loads
+  //    +BM  ├──────────────────┤    │ loads    │ loads    │     half of the
+  //         │     rank 1       │    │ its half │ its half │     B slice via TMA,
+  //         │  tile_m = p*2+1  │    └──────────┴──────────┘     then multicasts
+  //         │  loads BM rows   │          │               │     to the other CTA
+  //  +2*BM  └──────────────────┘          ▼               ▼
+  //         (independent loads,    ┌─────────────────────────┐
+  //          different M rows)     │  both CTAs' smem have   │
+  //                                │  the FULL B slice after │
+  //                                │  multicast; HBM read    │
+  //                                │  only once total        │
+  //                                └─────────────────────────┘
+  //
+  //  Each CTA then computes its own C output tile:
+  //
+  //        tile_n*BN ◄──── BN ────► (tile_n+1)*BN
+  //              ┌─────────────────────┐
+  //   p*2*BM     │       rank 0        │  C[p*2*BM   : +BM, tile_n*BN : +BN]
+  //              ├─────────────────────┤       ↑ both use the same
+  //   p*2*BM+BM  │       rank 1        │  C[p*2*BM+BM: +BM, tile_n*BN : +BN]
+  //              └─────────────────────┘         full B tile in smem
   auto decode = [&](int w, int &tile_m, int &tile_n) {
     const int gid     = w / group_sz;             // which group of cgroup_m cluster-M rows
     const int in_grp  = w - gid * group_sz;       // position within the group [0, group_sz)

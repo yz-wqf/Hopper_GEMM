@@ -5,8 +5,9 @@
 Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specialization +
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
-**17 of 31 benchmarked shapes at ≥1.00× cuBLAS 12.9; 27 at ≥0.96×; 80–87% of the 989.4
-TFLOPS hardware peak on large shapes.** Full table below.
+**17 of 31 shapes at ≥1.00× cuBLAS 12.9, and ahead of a tuned CUTLASS 4.7 on all 27 shapes
+CUTLASS supports (1.04–1.33×).** 80–87% of the 989.4 TFLOPS hardware peak on large shapes.
+Full table below.
 
 | document | |
 |---|---|
@@ -20,52 +21,64 @@ TFLOPS hardware peak on large shapes.** Full table below.
 **Hardware:** H100 SXM5 80GB @ 1980 MHz · **Toolkit:** CUDA 12.9 · **Baseline:** cuBLAS 12.9
 (`cublasGemmEx`, `CUBLAS_COMPUTE_32F`) · **Peak:** 989.4 TFLOPS FP16 dense tensor core
 
-**Method:** `alpha=1, beta=0`; median of 3 repeats × 20 iterations after 5 warm-ups; ours and
-cuBLAS timed back-to-back in the same process, **serially** — concurrent runs contend for the
-GPU and produce meaningless numbers.
+**Baselines:** cuBLAS 12.9 (`cublasGemmEx`, `CUBLAS_COMPUTE_32F`) and **CUTLASS 4.7**
+(`mma_half_cutlass.cu` — same contract, built from `CollectiveBuilder`, tile/cluster/schedule
+chosen by a 21-configuration sweep).
 
-**Columns:** `tile` = BM×BN chosen by the dispatcher · `GM` = GROUP_M chosen by the policy ·
-`tiles` = resulting output tiles against 132 SMs · `ratio` = ours / cuBLAS.
+**Method:** `alpha=1, beta=0`; median of 3 repeats × 20 iterations after 5 warm-ups, then the
+median of 3 whole runs. All three implementations timed back-to-back in the same process,
+**serially** — concurrent runs contend for the GPU and produce meaningless numbers.
 
-Regenerate with `make perf` (`perf_all` produces this table).
+CUTLASS shows `n/a` where `N % 8 != 0` or `K % 8 != 0`: it validates TMA alignment against the
+problem *extent*, so ragged shapes would need a zero-padded extent and a copy back. Our kernel
+runs them in place because TMA zero-fills out-of-range elements natively.
 
-| M × N × K | tile | GM | tiles | ours TF | cuBLAS TF | ratio | % peak |
-|---|---|---|---|---|---|---|---|
-| 4k×4095×4k | 128×256 | 8 | 512 | **508** | 148 | **3.43×** | 51% |
-| 4095×4095×4095 | 128×256 | 8 | 512 | **440** | 157 | **2.81×** | 44% |
-| 2k×2047×2k | 128×256 | 8 | 128 | **311** | 150 | **2.07×** | 31% |
-| 1k×1023×1k | 128×64 | 2 | 128 | **136** | 71 | **1.90×** | 14% |
-| 8k×8k×128 | 128×256 | 4 | 2048 | **304** | 287 | **1.06×** | 31% |
-| 1k×1k×1k | 128×64 | 2 | 128 | **319** | 304 | **1.05×** | 32% |
-| 8k×8k×4k | 128×256 | 8 | 2048 | **826** | 795 | **1.04×** | 84% |
-| 4k×8k×128 | 128×256 | 4 | 1024 | **269** | 261 | **1.03×** | 27% |
-| 16k×8k×128 | 128×256 | 4 | 4096 | **311** | 301 | **1.03×** | 31% |
-| 8k×8k×8k | 128×256 | 8 | 2048 | **804** | 780 | **1.03×** | 81% |
-| 16k×4k×8k | 128×256 | 8 | 2048 | **816** | 793 | **1.03×** | 82% |
-| 16k×16k×16k | 128×256 | 8 | 8192 | **836** | 815 | **1.03×** | 84% |
-| 16k×8k×4k | 128×256 | 8 | 4096 | **803** | 785 | **1.02×** | 81% |
-| 8k×8k×16k | 128×256 | 8 | 2048 | **819** | 803 | **1.02×** | 83% |
-| 8k×4k×8k | 128×256 | 8 | 1024 | **844** | 839 | **1.01×** | 85% |
-| 8k×8k×2k | 128×256 | 8 | 2048 | **797** | 795 | **1.00×** | 81% |
-| 32k×8k×2k | 128×256 | 8 | 8192 | **790** | 789 | **1.00×** | 80% |
-| 4k×8k×8k | 128×256 | 8 | 1024 | 830 | 832 | 1.00× | 84% |
-| 4k×4k×4k | 128×256 | 8 | 512 | 863 | 870 | 0.99× | 87% |
-| 4k×4k×8k | 128×256 | 8 | 512 | 813 | 824 | 0.99× | 82% |
-| 8k×1k×8k | 128×256 | 8 | 256 | 829 | 841 | 0.99× | 84% |
-| 4k×8k×256 | 128×256 | 4 | 1024 | 426 | 432 | 0.99× | 43% |
-| 384×2k×2k | 128×64 | 2 | 96 | 341 | 347 | 0.98× | 34% |
-| 4k×8k×512 | 128×256 | 4 | 1024 | 564 | 575 | 0.98× | 57% |
-| 4k×4k×1k | 128×256 | 8 | 512 | 630 | 646 | 0.98× | 64% |
-| 4k×8k×1k | 128×256 | 8 | 1024 | 676 | 695 | 0.97× | 68% |
-| 8k×8k×1k | 128×256 | 8 | 2048 | 670 | 690 | 0.97× | 68% |
-| 3000×1000×2000 | 128×256 | 8 | 96 | 463 | 486 | 0.95× | 47% |
-| 2k×2k×2k | 128×256 | 8 | 128 | 671 | 723 | 0.93× | 68% |
-| 2k×2k×512 | 128×256 | 4 | 128 | 362 | 430 | 0.84× | 37% |
-| 4k×512×4k | 128×128 | 16 | 128 | 543 | 707 | 0.77× | 55% |
+Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for this one).
 
-**31 shapes — 17 at ≥1.00×, 27 at ≥0.96×.**
+| M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
+|---|---|---|---|---|---|
+| 4k×4095×4k | **503** | n/a | 145 | — | **3.47×** |
+| 4095×4095×4095 | **437** | n/a | 154 | — | **2.83×** |
+| 2k×2047×2k | **309** | n/a | 147 | — | **2.10×** |
+| 1k×1023×1k | **137** | n/a | 71 | — | **1.93×** |
+| 4k×4k×8k | **901** | 806 | 824 | **1.12×** | **1.09×** |
+| 8k×8k×16k | **858** | 783 | 788 | **1.10×** | **1.09×** |
+| 8k×4k×8k | **912** | 707 | 837 | **1.29×** | **1.09×** |
+| 8k×8k×4k | **890** | 709 | 825 | **1.26×** | **1.08×** |
+| 8k×8k×2k | **840** | 688 | 780 | **1.22×** | **1.08×** |
+| 4k×8k×8k | **911** | 708 | 851 | **1.29×** | **1.07×** |
+| 16k×16k×16k | **845** | 675 | 806 | **1.25×** | **1.05×** |
+| 16k×8k×4k | **823** | 726 | 787 | **1.13×** | **1.05×** |
+| 4k×8k×128 | **279** | 235 | 268 | **1.19×** | **1.04×** |
+| 1k×1k×1k | **317** | 240 | 306 | **1.32×** | **1.04×** |
+| 16k×8k×128 | **312** | 263 | 302 | **1.19×** | **1.03×** |
+| 32k×8k×2k | **813** | 720 | 791 | **1.13×** | **1.03×** |
+| 8k×8k×8k | **812** | 760 | 795 | **1.07×** | **1.02×** |
+| 4k×8k×512 | 609 | 514 | 611 | **1.18×** | 1.00× |
+| 4k×4k×4k | 865 | 774 | 874 | **1.12×** | 0.99× |
+| 4k×8k×256 | 463 | 367 | 469 | **1.26×** | 0.99× |
+| 8k×1k×8k | 878 | 795 | 892 | **1.10×** | 0.98× |
+| 8k×8k×128 | 283 | 247 | 289 | **1.14×** | 0.98× |
+| 4k×4k×1k | 693 | 614 | 708 | **1.13×** | 0.98× |
+| 4k×8k×1k | 733 | 642 | 753 | **1.14×** | 0.97× |
+| 8k×8k×1k | 758 | 652 | 780 | **1.16×** | 0.97× |
+| 16k×4k×8k | 825 | 758 | 851 | **1.09×** | 0.97× |
+| 384×2k×2k | 338 | 254 | 350 | **1.33×** | 0.97× |
+| 3000×1000×2000 | 460 | 432 | 493 | **1.06×** | 0.93× |
+| 2k×2k×2k | 672 | 622 | 726 | **1.08×** | 0.93× |
+| 2k×2k×512 | 362 | 348 | 428 | **1.04×** | 0.85× |
+| 4k×512×4k | 573 | 438 | 696 | **1.31×** | 0.82× |
+
+
 
 Large shapes run **80–87% of the 989.4 TFLOPS** hardware peak.
+
+**On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
+runtime tile heuristic (that is what its offline profiler is for), so it gets the same two-rung
+dispatch ours has, using configurations found by sweeping 21 combinations of tile, cluster and
+kernel schedule. Before that tuning it sat at 131 TF on 1024³; after, 240. The residual
+1.05–1.30× on large shapes is a mainloop/epilogue difference, not a tiling artifact. CUTLASS is
+**bit-exact against cuBLAS** on every shape it runs.
 
 **Reading the extremes.** The top four rows are cuBLAS *losing*, not us winning: for
 `N % 8 != 0` it abandons its Hopper kernel for an sm_75 CUTLASS `align1` fallback (confirmed
@@ -87,6 +100,7 @@ make check      # correctness  (~2 min)
 make perf       # performance  (~5 min)
 make san        # compute-sanitizer, all four tools (~20 min)
 make probe      # re-derive the wgmma descriptor encodings
+make cutlass    # three-way vs CUTLASS and cuBLAS (needs CUTLASS=/path/to/cutlass)
 ```
 
 Requires CUDA 12.x and an H100 (or any sm_90a part). **`sm_90a`, not `sm_90`** — the plain
@@ -106,13 +120,14 @@ and takes a stream.
 
 ## Files
 
-13 sources in four groups. **`mma_half.cu` is the only one that ships** — everything else
+15 sources in four groups. **`mma_half.cu` is the only one that ships** — everything else
 exists to prove it works, measure it, or derive a constant inside it.
 
 ### Kernel
 | file | |
 |---|---|
 | `mma_half.cu` | the whole kernel — device code, host dispatch, `solve()` |
+| `mma_half_cutlass.cu` | the same contract built from CUTLASS 4.7 `CollectiveBuilder` primitives, as an independent cross-check. Aligned shapes only (see the table note). Tile/cluster/schedule chosen by a 21-configuration sweep |
 
 ### Correctness
 | file | what it checks |
@@ -134,6 +149,7 @@ one narrowing, at the store. Against cuBLAS most shapes come out **bit-exact**.
 | `perf_table.cu` | condensed headline table, more repeats per shape |
 | `perf_cmp.cu` | one shape from argv: `./perf_cmp M N K [iters]` — the workhorse for spot checks |
 | `perf_prof.cu` | one shape, ours only, no cuBLAS — for profiling under nsys without a second kernel in the trace |
+| `three_way.cu` | ours vs CUTLASS vs cuBLAS across all 31 shapes, with a per-shape CUTLASS correctness check. `make cutlass` |
 
 ### Introspection
 | file | |

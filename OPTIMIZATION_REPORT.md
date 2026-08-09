@@ -33,6 +33,7 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 9 | Epilogue v3: TMA store | **+6.7%** at small K |
 | 10 | Tile dispatch (template on `BM`,`BN`) | **1024³: 0.69× → 1.04×** |
 | 11 | Per-shape `GROUP_M` policy | **+2…8%** on 6 shapes |
+| 12 | Cross-check vs tuned CUTLASS 4.7 | **1.04–1.33×** ahead on all 27 supported shapes |
 | — | **Final** | **17/31 shapes ≥1.00× cuBLAS**, 27 at ≥0.96×, 80–87% of peak |
 
 ---
@@ -760,48 +761,120 @@ that times the first call. `solve()` uses the heuristics; `launch_tuned()` is op
 
 ---
 
+## 12. Cross-check against CUTLASS
+
+The hand-written kernel builds warp specialization, the TMA pipeline, cluster multicast and
+the TMA-store epilogue by hand. `mma_half_cutlass.cu` builds the same thing from CUTLASS 4.7
+`CollectiveBuilder` primitives, with an identical `solve()` contract, as an independent check
+that the hand-written machinery is worth its complexity.
+
+### Tuning CUTLASS before comparing
+
+CUTLASS's device API fixes the tile per instantiation -- there is **no runtime tile
+heuristic** (that is what its offline profiler is for). Comparing our per-shape dispatcher
+against a single fixed CUTLASS tile would measure our dispatcher, not the kernels. So the
+tile, cluster and kernel schedule were swept, 21 configurations over two shapes:
+
+| config | 1024³ | 4096³ |
+|---|---|---|
+| 128×256×64 c2×1 coop *(baseline)* | 131 | **776** |
+| 128×256×64 c1×2 coop | 133 | 786 |
+| 256×128×64 c2×1 coop | 129 | 744 |
+| 128×128×64 c1×1 coop | 191 | 641 |
+| 128×128×128 c1×1 coop | 202 | 541 |
+| 128×64×64 c1×1 coop | 227 | 374 |
+| **128×64×128 c1×1 coop** | **248** | 376 |
+| 64×128×64 c1×1 ping | 204 | 385 |
+| 64×64×64 c1×1 ping | 162 | 245 |
+| 128×32×64 c1×1 coop | 160 | 200 |
+| 128×256×128 c2×1 coop | 98 | 428 |
+| 256×256×64 c2×1 coop | **7** | **33** |
+
+Three things fall out:
+
+- **1024³ improved 1.83x** (131 -> 240 in the final build) from `128×64×128 c1×1`.
+- **4096³ could not be improved.** Nothing beat the baseline; the one nominal winner
+  (c1×2 at 786 vs 776) is 1.3%, inside the noise band, so it was not taken.
+- Small and large want *opposite* tiles, sharply: `128×64×128` is 1.83x better at 1024³ and
+  2.1x worse at 4096³. CUTLASS hits the same starvation wall step 10 describes.
+
+`256×256×64` collapsing to 7 / 33 TFLOPS is worth flagging: `can_implement` accepts it, so it
+builds and runs while being ~100x slow -- almost certainly a shared-memory overrun forcing a
+1-stage pipeline. A configuration sweep needs a sanity floor, not just a success check.
+
+### Two traps in the CUTLASS build
+
+**`EpilogueScheduleAuto` selects `DefaultEpilogue`, not the TMA one.** Measured 35% slower
+(572 vs 774 TFLOPS at 4096³). Pairing the cooperative mainloop with an explicit
+`TmaWarpSpecializedCooperative` epilogue -- what CUTLASS's own examples do -- is what the
+comparison uses. `-DCUTLASS_EPI_AUTO` reproduces the slow variant.
+
+**CUTLASS validates alignment against the problem *extent*, not the leading dimension.** A
+first attempt padded the *stride* of ragged operands, as `mma_half.cu` does; `can_implement`
+rejected all 19 such shapes and, because the return value was ignored, C was silently left
+untouched -- 19 failures all reporting `rel_l2 ≈ 1.0`. Supporting them properly means running
+a zero-padded *extent* and copying back, i.e. more work than the kernel under test performs,
+so those shapes are skipped instead. `mma_half.cu` has no such restriction: TMA zero-fills
+out-of-range elements, so it runs ragged shapes in place.
+
+### Result
+
+| M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
+|---|---|---|---|---|---|
+| 4k×4095×4k | **503** | n/a | 145 | — | **3.47×** |
+| 4095×4095×4095 | **437** | n/a | 154 | — | **2.83×** |
+| 2k×2047×2k | **309** | n/a | 147 | — | **2.10×** |
+| 1k×1023×1k | **137** | n/a | 71 | — | **1.93×** |
+| 4k×4k×8k | **901** | 806 | 824 | **1.12×** | **1.09×** |
+| 8k×8k×16k | **858** | 783 | 788 | **1.10×** | **1.09×** |
+| 8k×4k×8k | **912** | 707 | 837 | **1.29×** | **1.09×** |
+| 8k×8k×4k | **890** | 709 | 825 | **1.26×** | **1.08×** |
+| 8k×8k×2k | **840** | 688 | 780 | **1.22×** | **1.08×** |
+| 4k×8k×8k | **911** | 708 | 851 | **1.29×** | **1.07×** |
+| 16k×16k×16k | **845** | 675 | 806 | **1.25×** | **1.05×** |
+| 16k×8k×4k | **823** | 726 | 787 | **1.13×** | **1.05×** |
+| 4k×8k×128 | **279** | 235 | 268 | **1.19×** | **1.04×** |
+| 1k×1k×1k | **317** | 240 | 306 | **1.32×** | **1.04×** |
+| 16k×8k×128 | **312** | 263 | 302 | **1.19×** | **1.03×** |
+| 32k×8k×2k | **813** | 720 | 791 | **1.13×** | **1.03×** |
+| 8k×8k×8k | **812** | 760 | 795 | **1.07×** | **1.02×** |
+| 4k×8k×512 | 609 | 514 | 611 | **1.18×** | 1.00× |
+| 4k×4k×4k | 865 | 774 | 874 | **1.12×** | 0.99× |
+| 4k×8k×256 | 463 | 367 | 469 | **1.26×** | 0.99× |
+| 8k×1k×8k | 878 | 795 | 892 | **1.10×** | 0.98× |
+| 8k×8k×128 | 283 | 247 | 289 | **1.14×** | 0.98× |
+| 4k×4k×1k | 693 | 614 | 708 | **1.13×** | 0.98× |
+| 4k×8k×1k | 733 | 642 | 753 | **1.14×** | 0.97× |
+| 8k×8k×1k | 758 | 652 | 780 | **1.16×** | 0.97× |
+| 16k×4k×8k | 825 | 758 | 851 | **1.09×** | 0.97× |
+| 384×2k×2k | 338 | 254 | 350 | **1.33×** | 0.97× |
+| 3000×1000×2000 | 460 | 432 | 493 | **1.06×** | 0.93× |
+| 2k×2k×2k | 672 | 622 | 726 | **1.08×** | 0.93× |
+| 2k×2k×512 | 362 | 348 | 428 | **1.04×** | 0.85× |
+| 4k×512×4k | 573 | 438 | 696 | **1.31×** | 0.82× |
+
+**Ours is ahead on all 27 shapes CUTLASS supports (1.04–1.33x)**, and CUTLASS is bit-exact
+against cuBLAS on every one of them. After tuning, the margin is a fairly uniform 1.05–1.30x
+on large shapes -- a mainloop/epilogue difference rather than a tiling artifact, which is the
+comparison worth having.
+
+---
+
 ## Final performance
 
-Median of 3 repeats × 20 iterations, run serially. `GM` is the policy's choice.
+The measured table lives in **[`README.md`](README.md)** and in step 12 above — deliberately
+not repeated a third time here, because two copies of these numbers have already drifted apart
+once during this work.
 
-| M × N × K | tile | GM | tiles | ours TF | cuBLAS TF | ratio | % peak |
-|---|---|---|---|---|---|---|---|
-| 4k×4095×4k | 128×256 | 8 | 512 | **508** | 148 | **3.43×** | 51% |
-| 4095×4095×4095 | 128×256 | 8 | 512 | **440** | 157 | **2.81×** | 44% |
-| 2k×2047×2k | 128×256 | 8 | 128 | **311** | 150 | **2.07×** | 31% |
-| 1k×1023×1k | 128×64 | 2 | 128 | **136** | 71 | **1.90×** | 14% |
-| 8k×8k×128 | 128×256 | 4 | 2048 | **304** | 287 | **1.06×** | 31% |
-| 1k×1k×1k | 128×64 | 2 | 128 | **319** | 304 | **1.05×** | 32% |
-| 8k×8k×4k | 128×256 | 8 | 2048 | **826** | 795 | **1.04×** | 84% |
-| 4k×8k×128 | 128×256 | 4 | 1024 | **269** | 261 | **1.03×** | 27% |
-| 16k×8k×128 | 128×256 | 4 | 4096 | **311** | 301 | **1.03×** | 31% |
-| 8k×8k×8k | 128×256 | 8 | 2048 | **804** | 780 | **1.03×** | 81% |
-| 16k×4k×8k | 128×256 | 8 | 2048 | **816** | 793 | **1.03×** | 82% |
-| 16k×16k×16k | 128×256 | 8 | 8192 | **836** | 815 | **1.03×** | 84% |
-| 16k×8k×4k | 128×256 | 8 | 4096 | **803** | 785 | **1.02×** | 81% |
-| 8k×8k×16k | 128×256 | 8 | 2048 | **819** | 803 | **1.02×** | 83% |
-| 8k×4k×8k | 128×256 | 8 | 1024 | **844** | 839 | **1.01×** | 85% |
-| 8k×8k×2k | 128×256 | 8 | 2048 | **797** | 795 | **1.00×** | 81% |
-| 32k×8k×2k | 128×256 | 8 | 8192 | **790** | 789 | **1.00×** | 80% |
-| 4k×8k×8k | 128×256 | 8 | 1024 | 830 | 832 | 1.00× | 84% |
-| 4k×4k×4k | 128×256 | 8 | 512 | 863 | 870 | 0.99× | 87% |
-| 4k×4k×8k | 128×256 | 8 | 512 | 813 | 824 | 0.99× | 82% |
-| 8k×1k×8k | 128×256 | 8 | 256 | 829 | 841 | 0.99× | 84% |
-| 4k×8k×256 | 128×256 | 4 | 1024 | 426 | 432 | 0.99× | 43% |
-| 384×2k×2k | 128×64 | 2 | 96 | 341 | 347 | 0.98× | 34% |
-| 4k×8k×512 | 128×256 | 4 | 1024 | 564 | 575 | 0.98× | 57% |
-| 4k×4k×1k | 128×256 | 8 | 512 | 630 | 646 | 0.98× | 64% |
-| 4k×8k×1k | 128×256 | 8 | 1024 | 676 | 695 | 0.97× | 68% |
-| 8k×8k×1k | 128×256 | 8 | 2048 | 670 | 690 | 0.97× | 68% |
-| 3000×1000×2000 | 128×256 | 8 | 96 | 463 | 486 | 0.95× | 47% |
-| 2k×2k×2k | 128×256 | 8 | 128 | 671 | 723 | 0.93× | 68% |
-| 2k×2k×512 | 128×256 | 4 | 128 | 362 | 430 | 0.84× | 37% |
-| 4k×512×4k | 128×128 | 16 | 128 | 543 | 707 | 0.77× | 55% |
+Summary: **17 of 31 shapes at ≥1.00× cuBLAS 12.9**, 27 at ≥0.96×, and **ahead of a tuned
+CUTLASS 4.7 on all 27 shapes CUTLASS supports (1.04–1.33×)**. Large shapes run 80–87% of the
+989.4 TFLOPS hardware peak; the best single figure is 4096³ at 87% and 8192×4096×8192 at
+912 TFLOPS.
 
-**31 shapes — 17 at ≥1.00×, 27 at ≥0.96×.**
+Regenerate with `make perf` (vs cuBLAS) and `make cutlass` (three-way).
 
-Large shapes run 80–87% of the 989.4 TFLOPS hardware peak. The bottom of the table is grid
-starvation — every shape below 0.95× has ≤128 tiles against 132 SMs.
+Every shape below 0.95× has ≤128 output tiles against 132 SMs — the bottom of the table is
+grid starvation, not math.
 
 ---
 

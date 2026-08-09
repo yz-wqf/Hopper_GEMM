@@ -12,6 +12,9 @@
 #      meaningless numbers (cuBLAS reading 265 TF at 8192^3 instead of ~790).
 
 NVCC    ?= nvcc
+# Path to a CUTLASS 3.x/4.x checkout, used only by the `cutlass` / `three_way` targets.
+# Override on the command line:  make cutlass CUTLASS=/path/to/cutlass
+CUTLASS ?= $(HOME)/cutlass
 ARCH    := -gencode arch=compute_90a,code=sm_90a
 CXXFLAGS:= $(ARCH) -O3 -I.
 LDLIBS  := -lcublas
@@ -21,6 +24,7 @@ CHECK   := check_all check_fp64 check_large
 PERF    := perf_all perf_table perf_cmp perf_prof smem_budget
 SAN     := san_sweep san_large
 PROBE   := probe_kmajor probe_mnmajor probe_mnmajor_kadv
+CUTFLAGS:= -std=c++17 -I$(CUTLASS)/include -I$(CUTLASS)/tools/util/include --expt-relaxed-constexpr
 
 ALL := $(CHECK) $(PERF) $(SAN) $(PROBE)
 
@@ -58,5 +62,16 @@ probe: $(PROBE)
 	@echo "=== MN-major descriptor (B, native N-major) ==="     && ./probe_mnmajor | head -2
 	@echo "=== MN-major k-advance ==="                          && ./probe_mnmajor_kadv
 
+# CUTLASS reference build. Fails with a readable message rather than a wall of missing-header
+# errors when CUTLASS points somewhere that does not exist.
+three_way: three_way.cu mma_half.cu mma_half_cutlass.cu perf_shapes.h
+	@test -f "$(CUTLASS)/include/cutlass/cutlass.h" || { \
+	  echo "error: CUTLASS not found at '$(CUTLASS)'."; \
+	  echo "       Set it, e.g.  make cutlass CUTLASS=/path/to/cutlass"; exit 1; }
+	$(NVCC) $(CXXFLAGS) $(CUTFLAGS) -DCUTLASS_NO_SOLVE -o $@ three_way.cu mma_half_cutlass.cu $(LDLIBS)
+
+cutlass: three_way
+	./three_way
+
 clean:
-	rm -f $(ALL)
+	rm -f $(ALL) three_way

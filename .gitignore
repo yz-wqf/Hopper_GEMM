@@ -1,0 +1,32 @@
+# Build artifacts. Each executable shares the stem of its .cu source, so they are
+# listed explicitly rather than by pattern (a pattern would also match the sources).
+check_all
+check_fp64
+check_large
+perf_all
+perf_cmp
+perf_prof
+perf_table
+probe_kmajor
+probe_mnmajor
+probe_mnmajor_kadv
+san_large
+san_sweep
+smem_budget
+three_way
+
+# Intermediates and profiler output
+*.o
+*.obj
+*.cubin
+*.ptx
+*.sass
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
