@@ -5,8 +5,10 @@
 Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specialization +
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
-**22 of 31 shapes at ≥1.00× cuBLAS 12.9, and ≥ a per-shape-tuned CUTLASS 4.7 on 14 of the 27
-shapes CUTLASS supports.** 80–93% of the 989.4 TFLOPS hardware peak on large shapes.
+**20 of 31 shapes at ≥1.00× cuBLAS 12.9, and ≥ a per-shape-tuned CUTLASS 4.7 on 20 of the 27
+shapes CUTLASS supports** — but read that as *near-parity with both*, not a lead: 24 of the
+27 CUTLASS rows sit within ±4%. Measured on **random operand data with interleaved timing**;
+see Methodology, because both choices matter more than any optimization in this repo.
 Full table below.
 
 | document | |
@@ -37,46 +39,71 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **501** | n/a | 145 | — | **3.45×** |
-| 4095×4095×4095 | **436** | n/a | 155 | — | **2.81×** |
-| 2k×2047×2k | **310** | n/a | 147 | — | **2.11×** |
-| 1k×1023×1k | **138** | n/a | 72 | — | **1.92×** |
-| 4k×4k×8k | **902** | 867 | 798 | **1.04×** | **1.13×** |
-| 8k×8k×2k | **842** | 823 | 755 | **1.02×** | **1.12×** |
-| 4k×8k×8k | **918** | 816 | 824 | **1.13×** | **1.11×** |
-| 8k×8k×16k | **846** | 838 | 788 | **1.01×** | **1.07×** |
-| 8k×4k×8k | **880** | 802 | 824 | **1.10×** | **1.07×** |
-| 1k×1k×1k | **326** | 294 | 306 | **1.11×** | **1.07×** |
-| 8k×8k×128 | **304** | 305 | 288 | 1.00× | **1.06×** |
-| 4k×8k×128 | **283** | 274 | 269 | **1.03×** | **1.05×** |
-| 16k×16k×16k | **845** | 846 | 806 | 1.00× | **1.05×** |
-| 8k×8k×8k | **830** | 835 | 793 | 0.99× | **1.05×** |
-| 32k×8k×2k | **810** | 790 | 785 | **1.03×** | **1.03×** |
-| 16k×8k×4k | **811** | 812 | 787 | 1.00× | **1.03×** |
-| 8k×8k×4k | **840** | 772 | 816 | **1.09×** | **1.03×** |
-| 16k×4k×8k | **820** | 828 | 796 | 0.99× | **1.03×** |
-| 16k×8k×128 | **312** | 326 | 303 | 0.96× | **1.03×** |
-| 8k×8k×1k | **761** | 730 | 750 | **1.04×** | **1.02×** |
-| 4k×8k×256 | **473** | 476 | 469 | 0.99× | **1.01×** |
-| 384×2k×2k | **350** | 339 | 350 | **1.03×** | **1.00×** |
-| 8k×1k×8k | 886 | 888 | 887 | 1.00× | 1.00× |
-| 4k×8k×512 | 609 | 673 | 611 | 0.90× | 1.00× |
-| 4k×4k×4k | 864 | 857 | 870 | **1.01×** | 0.99× |
-| 4k×4k×1k | 692 | 675 | 705 | **1.03×** | 0.98× |
-| 4k×8k×1k | 735 | 714 | 754 | **1.03×** | 0.97× |
-| 3000×1000×2000 | 461 | 466 | 491 | 0.99× | 0.94× |
-| 2k×2k×2k | 674 | 700 | 725 | 0.96× | 0.93× |
-| 2k×2k×512 | 362 | 396 | 428 | 0.91× | 0.85× |
-| 4k×512×4k | 565 | 687 | 697 | 0.82× | 0.81× |
+| 4k×4095×4k | **476** | n/a | 144 | — | **3.31×** |
+| 4095×4095×4095 | **414** | n/a | 152 | — | **2.73×** |
+| 2k×2047×2k | **298** | n/a | 144 | — | **2.07×** |
+| 1k×1023×1k | **134** | n/a | 69 | — | **1.94×** |
+| 1k×1k×1k | **319** | 284 | 300 | **1.12×** | **1.06×** |
+| 8k×8k×128 | **304** | 302 | 286 | **1.01×** | **1.06×** |
+| 4k×8k×128 | **283** | 274 | 268 | **1.03×** | **1.05×** |
+| 16k×8k×128 | **313** | 321 | 302 | 0.97× | **1.04×** |
+| 8k×8k×1k | **638** | 574 | 618 | **1.11×** | **1.03×** |
+| 8k×8k×8k | **697** | 690 | 679 | **1.01×** | **1.03×** |
+| 16k×8k×4k | **682** | 670 | 666 | **1.02×** | **1.03×** |
+| 16k×4k×8k | **697** | 691 | 681 | **1.01×** | **1.02×** |
+| 8k×8k×2k | **636** | 615 | 625 | **1.04×** | **1.02×** |
+| 8k×8k×16k | **682** | 672 | 671 | **1.01×** | **1.02×** |
+| 8k×4k×8k | **705** | 689 | 695 | **1.02×** | **1.01×** |
+| 8k×8k×4k | **673** | 666 | 664 | **1.01×** | **1.01×** |
+| 4k×8k×256 | **464** | 456 | 460 | **1.02×** | **1.01×** |
+| 4k×4k×8k | **664** | 652 | 660 | **1.02×** | **1.01×** |
+| 32k×8k×2k | **672** | 645 | 669 | **1.04×** | **1.01×** |
+| 16k×16k×16k | **673** | 670 | 670 | **1.00×** | **1.00×** |
+| 384×2k×2k | 343 | 329 | 344 | **1.04×** | 1.00× |
+| 4k×8k×512 | 574 | 613 | 578 | 0.94× | 0.99× |
+| 8k×1k×8k | 714 | 707 | 722 | **1.01×** | 0.99× |
+| 4k×8k×8k | 686 | 682 | 694 | **1.01×** | 0.99× |
+| 4k×4k×1k | 644 | 635 | 655 | **1.01×** | 0.98× |
+| 4k×4k×4k | 730 | 731 | 749 | 1.00× | 0.97× |
+| 4k×8k×1k | 652 | 647 | 680 | **1.01×** | 0.96× |
+| 2k×2k×2k | 639 | 664 | 682 | 0.96× | 0.94× |
+| 3000×1000×2000 | 452 | 455 | 488 | 0.99× | 0.93× |
+| 4k×512×4k | 569 | 636 | 646 | 0.89× | 0.88× |
+| 2k×2k×512 | 358 | 394 | 420 | 0.91× | 0.85× |
 
-**31 shapes — ours ≥ cuBLAS on 22; ours ≥ CUTLASS on 14 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 20; ours ≥ CUTLASS on 20 of 27 supported.**
+
+### Methodology (read before the numbers)
+
+**Operand data changes throughput by up to 19%.** Same kernel, same shape
+(8192×4096×8192, CUTLASS 128×256×64 c2×1):
+
+| operand data | TFLOPS |
+|---|---|
+| all zero (`memset 0`) | **906** |
+| `0x11` constant | 809 |
+| uniform, 200 levels | 833 |
+| **uniform, full 16-bit entropy** | **761** |
+| **normal(0, 0.05), NN-weight-like** | **759** |
+
+Zero operands draw far less dynamic power in the tensor cores, so the GPU sustains higher
+clocks. Benchmarking on `memset` patterns overstates everything. This harness fills both
+operands with full-entropy uniform random data, which lands within 0.3% of NN-weight-like
+normal data — so the absolute figures here are ~6% below a `0x11` benchmark and ~19% below
+an all-zero one, and are the ones you would actually see.
+
+**Timing is interleaved, not sequential.** On large shapes both kernels swing ±16% run to
+run *together*; timing A then B lets whichever ran at high clocks win. At 8192×4096×8192
+sequential timing reported 1.10× for a pair that measures **1.01×** interleaved. Every
+large-shape "win" this repo previously claimed was that artifact.
 
 Rows within ~1% of each other are inside the run-to-run band on this machine: large shapes
 drift ±50–100 TFLOPS between runs depending on clocks. Treat `0.99×`–`1.01×` as a tie and
 only the ≥1.05× and ≤0.95× entries as decided. The medians above are over 3 serial runs.
 
-Large shapes run **80–93% of the 989.4 TFLOPS** hardware peak — best single figure is
-4096×8192×8192 at 918 TFLOPS (92.8% of peak), with 4096³ at 864 (87.3%).
+Large shapes run **65–74% of the 989.4 TFLOPS** hardware peak on random data — best
+single figure is 4096³ at 730 TFLOPS (73.8%). On `0x11` the same code reads 864 (87.3%);
+that number is not wrong, it is just measuring easier data.
 
 **On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
 runtime tile heuristic (that is what its offline profiler is for) — so it gets the same two-rung

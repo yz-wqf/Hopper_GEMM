@@ -5,8 +5,8 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
-Derived from taking an FP16 GEMM from 744 → 918 TFLOPS peak on H100 SXM5 80 GB (22/31 shapes
-at or above cuBLAS 12.9, at or above a per-shape-tuned CUTLASS 4.7 on 14 of the 27 shapes it supports, up to
+Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
+at or above cuBLAS 12.9, at or above a per-shape-tuned CUTLASS 4.7 on 20 of the 27 shapes it supports (near-parity: 24 within ±4%), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -545,8 +545,16 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 ## Step 11: Cross-check against CUTLASS
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
-Result (after tuning both **per shape**): **at or above CUTLASS on 14 of the 27 shapes it
-supports**, typical margin 1.00–1.13×; CUTLASS is bit-exact against cuBLAS on every one.
+Result (after tuning both **per shape**, on random data with interleaved timing): **at or
+above CUTLASS on 20 of the 27 shapes it supports**, but the honest word is *near-parity* —
+24 of those 27 rows are within ±4%, and only two exceed 5%. CUTLASS is bit-exact against
+cuBLAS on every one.
+
+**Two measurement choices dominated every optimization in the project.** Operand data is
+worth up to 19% (all-zero 906 TFLOPS vs full-entropy random 761 on identical code — zero
+operands draw less tensor-core power so clocks boost), and sequential A-then-B timing does
+not cancel clock drift (1.10× sequential vs 1.01× interleaved on the same pair). Get both
+right before believing any margin.
 
 **Give it the same tuning freedom your dispatcher has, or your score is fiction.** A kernel
 that picks from a three-rung tile ladder at runtime, compared against CUTLASS pinned to two

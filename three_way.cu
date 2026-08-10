@@ -14,11 +14,28 @@ void set_swizzle(int);
 void set_config(int);
 int num_configs();
 }
+// Deterministic pseudo-random fill, on device. Performance depends materially on the
+// operand data -- at 8192x4096x8192 the same kernel measures 906 TFLOPS on all-zero input,
+// 795 on 0x11, and 834 on random, a 14% spread. Zero operands draw far less tensor-core
+// power so the GPU sustains higher clocks. Benchmarking on memset patterns is not
+// representative; random is.
+__global__ void rand_fill_kernel(half *p, size_t n, unsigned seed){
+  size_t i = (size_t)blockIdx.x*blockDim.x + threadIdx.x;
+  size_t stride = (size_t)gridDim.x*blockDim.x;
+  for(; i<n; i+=stride){
+    unsigned h = (unsigned)(i*2654435761u) ^ seed;
+    h ^= h>>15; h *= 2246822519u; h ^= h>>13; h *= 3266489917u; h ^= h>>16;
+    p[i] = __float2half(((float)(h & 0xffff) / 32768.0f) - 1.0f);   // [-1, 1)
+  }
+}
+static void rand_fill(half *p, size_t n, unsigned seed){
+  rand_fill_kernel<<<1024,256>>>(p,n,seed);
+}
 static cublasHandle_t H;
 static double med(std::vector<double> v){std::sort(v.begin(),v.end());return v[v.size()/2];}
 int main(int argc,char**argv){
   cudaFree(0); cublasCreate(&H);
-  const float al=1.f,be=0.f; const int REP=3,IT=20;
+  const float al=1.f,be=0.f; const int REP=5,IT=20;
   std::mt19937 rng(9); std::uniform_real_distribution<float> D(-1.f,1.f);
   printf("%-18s %9s %9s %9s %8s %8s  %s\n","M x N x K","ours","CUTLASS","cuBLAS",
          "ours/cut","ours/cuB","cutlass correctness");
@@ -34,12 +51,10 @@ int main(int argc,char**argv){
     // left as memset, and the shape reports a spurious FAIL.
     h100_hgemm_cutlass::set_config(-1); h100_hgemm_cutlass::set_swizzle(1);
     char verdict[24]="skipped (N%8/K%8)";
+    rand_fill(A,(size_t)M*K,0x9e3779b9u ^ (unsigned)i);
+    rand_fill(B,(size_t)K*N,0x85ebca6bu ^ (unsigned)i);
+    cudaDeviceSynchronize();
     if(cut_ok){
-      std::vector<half> hA((size_t)M*K),hB((size_t)K*N);
-      for(auto&v:hA) v=__float2half(D(rng));
-      for(auto&v:hB) v=__float2half(D(rng));
-      cudaMemcpy(A,hA.data(),hA.size()*2,cudaMemcpyHostToDevice);
-      cudaMemcpy(B,hB.data(),hB.size()*2,cudaMemcpyHostToDevice);
       cublasGemmEx(H,CUBLAS_OP_N,CUBLAS_OP_N,N,M,K,&al,B,CUDA_R_16F,N,A,CUDA_R_16F,K,&be,R,CUDA_R_16F,N,CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT);
       cudaMemset(C,0,(size_t)M*N*2);
       h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0);
@@ -51,7 +66,6 @@ int main(int argc,char**argv){
       for(size_t z=0;z<ho.size();z++){double o=__half2float(ho[z]),r=__half2float(hr[z]);num+=(o-r)*(o-r);den+=r*r;}
       snprintf(verdict,sizeof verdict,"%s (%.1e)",sqrt(num/(den+1e-30))<3e-3?"OK":"FAIL",sqrt(num/(den+1e-30)));
     }
-    cudaMemset(A,0x11,(size_t)M*K*2); cudaMemset(B,0x11,(size_t)K*N*2);
     auto ours=[&]{ h100_hgemm::launch(A,B,C,M,N,K,al,be,0); };
     auto cut =[&]{ h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0); };
     auto cb  =[&]{ cublasGemmEx(H,CUBLAS_OP_N,CUBLAS_OP_N,N,M,K,&al,B,CUDA_R_16F,N,A,CUDA_R_16F,K,&be,C,CUDA_R_16F,N,CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT); };
@@ -98,7 +112,19 @@ int main(int argc,char**argv){
       // Re-verify with the config that will actually be timed, not just the default one.
       if(!h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0))
         snprintf(verdict,sizeof verdict,"UNUSABLE cfg%d",best_cfg); }
-    double o=time(ours), c=cut_ok?time(cut):0.0, b=time(cb);
+    // Interleaved timing. Sequential A-then-B does not cancel clock drift, and on large
+    // shapes the drift dwarfs the effect: at 8192x4096x8192 both kernels swing 785-912
+    // TFLOPS run to run *together*, and sequential timing reported 1.10x for a pair that
+    // measures 1.01x interleaved. Round-robin so drift hits all three equally.
+    auto one=[&](auto fn){ cudaEventRecord(e0); for(int j=0;j<IT;j++) fn();
+      cudaEventRecord(e1); cudaEventSynchronize(e1); cudaEventElapsedTime(&t,e0,e1); return (double)t/IT; };
+    for(int r=0;r<5;r++){ ours(); if(cut_ok) cut(); cb(); }
+    cudaDeviceSynchronize();
+    std::vector<double> vo,vc,vb;
+    for(int r=0;r<REP;r++){ vo.push_back(one(ours));
+                            if(cut_ok) vc.push_back(one(cut));
+                            vb.push_back(one(cb)); }
+    double o=fl/(med(vo)*1e9), c=cut_ok?fl/(med(vc)*1e9):0.0, b=fl/(med(vb)*1e9);
     char nm[48]; snprintf(nm,sizeof nm,"%lldx%lldx%lld",M,N,K);
     if(cut_ok) printf("%-18s %9.1f %9.1f %9.1f %7.2fx %7.2fx  c%d/sw%d %s\n",nm,o,c,b,o/c,o/b,best_cfg,best_sw,verdict);
     else       printf("%-18s %9.1f %9s %9.1f %8s %7.2fx  %s\n",nm,o,"n/a",b,"n/a",o/b,verdict);
