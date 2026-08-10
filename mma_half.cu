@@ -1336,7 +1336,10 @@ bool launch_mainloop(const half *A, const half *B, half *C, int M, int N, int K,
   // The policy below lives in the #else branch, so resolve the auto sentinel here too --
   // passing group_m == 0 through would make group_sz zero and divide by zero in the decode.
   if (group_m == 0) {
+    const int tiles_m = (M + 127) / 128;
     if (CFG_FORCE_BN == 64)  group_m = 2;
+    else if (K <= 128)       group_m = 1;
+    else if (tiles_m <= 16)  group_m = 1;
     else if (K <= 512)       group_m = 4;
     else if (N <= 512)       group_m = 16;
     else                     group_m = GROUP_M;
@@ -1377,13 +1380,26 @@ bool launch_mainloop(const half *A, const half *B, half *C, int M, int N, int K,
   //                                                  4096x8192x512:  +2.9% x3)
   //   N<=512  -> 16   narrow N, long k-loop         (4096x512x4096:  +4.5% x3)
   //
+  // CAVEAT ON PROVENANCE. The K<=512 / N<=512 / default arms were fitted with memset operand
+  // data, a hot L2 and sequential timing -- all three since shown to distort results. The two
+  // K<=128 / tiles_m<=16 arms were fitted under the corrected regime. The older arms have not
+  // been re-derived, so they are suspect: re-tuning the whole policy under random data, cold
+  // L2 and interleaved timing is open work, and the autotuner exists precisely because a
+  // four-line rule cannot cover this.
+  //
   // group_m == 0 means "auto"; any explicit value (from the autotuner, or a benchmark
   // pinning the old behaviour) overrides the policy.
   if (group_m == 0) {
-    if (bn == 64)      group_m = 2;
-    else if (K <= 512) group_m = 4;
-    else if (N <= 512) group_m = 16;
-    else               group_m = GROUP_M;
+    const int tiles_m = (M + 127) / 128;
+    if (bn == 64)            group_m = 2;
+    // Very short k-loop, or too few M-tiles for grouping to mean anything: rasterize
+    // straight down N. Measured under random data + cold L2 + interleaved timing, which is
+    // NOT the regime the rest of this policy was fitted in -- see the note below.
+    else if (K <= 128)       group_m = 1;   // 3/3 K=128 shapes, +6..9%
+    else if (tiles_m <= 16)  group_m = 1;   // 2048x2048x512 +19%, 2048x2048x2048 +2%
+    else if (K <= 512)       group_m = 4;
+    else if (N <= 512)       group_m = 16;
+    else                     group_m = GROUP_M;
   }
 
   if (bn == 256)

@@ -6,7 +6,7 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
 Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
-at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (14/27 ≥, 16 ties; one clear win at 1024³), up to
+at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (14/27 ≥, 17 ties), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -501,6 +501,18 @@ tile_n = in_grp / gcm;                                    // N slow
 ---
 
 ## Step 10: Per-shape GROUP_M policy — structural rules beat lookup tables
+
+**Re-derive every tuned constant when you fix your measurement setup.** A GROUP_M policy
+fitted under memset data + hot L2 + sequential timing was wrong once all three were corrected:
+`K<=512 -> GROUP_M=4` should have been `1` for short-K and small-grid shapes, worth **+19%** on
+one shape and +6..9% on four more. The kernel had not changed; only the ability to measure it
+had. Tuned constants inherit the validity of the harness that produced them, and fixing the
+harness silently invalidates them all — most will still be right, and you will not know which.
+
+Two arms that did survive scrutiny, and one warning: `K <= 128 -> GROUP_M=1` and
+`tiles_m <= 16 -> GROUP_M=1` (rasterize straight down N when the k-loop is too short for L2
+reuse to pay for grouping, or when there are too few M-tiles for a group of 4 to mean
+anything). Keep it narrow — at 16384³, GROUP_M=1 measures **374 TFLOPS against 710**.
 
 **Before hard-coding any winner, search each shape 3 independent times.** Only 16 of 31
 shapes picked the same best GROUP_M all 3 times — for the other 15 the "winner" was noise.

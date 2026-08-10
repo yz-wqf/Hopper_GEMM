@@ -37,7 +37,8 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
 | 15 | L2 residency hints on TMA | **+1.5%** median on qualifying shapes |
-| — | **Final** | **parity**: 13/31 ≥ cuBLAS, 14/27 ≥ tuned CUTLASS (16 ties), 65–79% of peak, random data + cold L2 |
+| 16 | Re-tune GROUP_M under corrected measurement | **+6–19%** on five short-K / small-grid shapes |
+| — | **Final** | **parity**: 14/31 ≥ cuBLAS, 14/27 ≥ tuned CUTLASS (17 ties), 65–79% of peak, random data + cold L2 |
 
 ---
 
@@ -949,42 +950,42 @@ runs them in place.
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **468** | n/a | 143 | — | **3.26×** |
+| 4k×4095×4k | **467** | n/a | 143 | — | **3.26×** |
 | 4095×4095×4095 | **408** | n/a | 150 | — | **2.71×** |
-| 2k×2047×2k | **264** | n/a | 135 | — | **1.96×** |
-| 1k×1023×1k | **108** | n/a | 65 | — | **1.66×** |
-| 8k×8k×128 | **290** | 298 | 282 | 0.97× | **1.03×** |
-| 16k×8k×4k | **650** | 638 | 635 | tie | **1.02×** |
-| 8k×8k×16k | **712** | 710 | 696 | tie | **1.02×** |
-| 16k×4k×8k | **740** | 735 | 725 | tie | **1.02×** |
-| 8k×8k×8k | **745** | 740 | 731 | tie | **1.02×** |
-| 8k×8k×4k | **698** | 689 | 686 | tie | **1.02×** |
-| 16k×8k×128 | **303** | 319 | 299 | 0.95× | **1.01×** |
-| 4k×8k×128 | **260** | 259 | 259 | tie | **1.00×** |
-| 32k×8k×2k | **634** | 613 | 633 | **1.03×** | **1.00×** |
-| 16k×16k×16k | 666 | 664 | 667 | tie | 1.00× |
-| 4k×8k×8k | 682 | 678 | 686 | tie | 0.99× |
-| 8k×8k×2k | 723 | 721 | 727 | tie | 0.99× |
-| 8k×4k×8k | 746 | 737 | 752 | tie | 0.99× |
+| 2k×2047×2k | **273** | n/a | 135 | — | **2.02×** |
+| 1k×1023×1k | **109** | n/a | 65 | — | **1.66×** |
+| 16k×8k×128 | **320** | 320 | 299 | tie | **1.07×** |
+| 8k×8k×128 | **300** | 294 | 283 | tie | **1.06×** |
+| 16k×4k×8k | **688** | 661 | 651 | **1.04×** | **1.06×** |
+| 16k×8k×4k | **650** | 641 | 636 | tie | **1.02×** |
+| 4k×8k×128 | **266** | 259 | 261 | **1.03×** | **1.02×** |
+| 8k×8k×8k | **710** | 703 | 695 | tie | **1.02×** |
+| 8k×8k×4k | **727** | 717 | 714 | tie | **1.02×** |
+| 8k×8k×16k | **713** | 718 | 704 | tie | **1.01×** |
+| 32k×8k×2k | **714** | 685 | 711 | **1.04×** | **1.00×** |
+| 16k×16k×16k | **660** | 676 | 659 | tie | **1.00×** |
+| 8k×4k×8k | 706 | 702 | 710 | tie | 0.99× |
+| 8k×8k×2k | 734 | 730 | 739 | tie | 0.99× |
+| 4k×8k×8k | 748 | 738 | 753 | tie | 0.99× |
 | 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
-| 4k×4k×4k | 762 | 765 | 778 | tie | 0.98× |
-| 4k×8k×512 | 563 | 627 | 576 | 0.90× | 0.98× |
-| 4k×4k×8k | 763 | 773 | 782 | tie | 0.98× |
-| 4k×8k×256 | 430 | 446 | 442 | 0.97× | 0.97× |
-| 1k×1k×1k | 214 | 202 | 220 | **1.06×** | 0.97× |
-| 4k×512×4k | 514 | 537 | 533 | 0.96× | 0.96× |
-| 8k×8k×1k | 691 | 673 | 725 | **1.03×** | 0.95× |
-| 4k×8k×1k | 664 | 660 | 698 | tie | 0.95× |
-| 4k×4k×1k | 616 | 624 | 647 | tie | 0.95× |
-| 2k×2k×2k | 567 | 596 | 607 | 0.95× | 0.93× |
-| 3000×1000×2000 | 391 | 412 | 456 | 0.95× | 0.86× |
-| 2k×2k×512 | 280 | 314 | 327 | 0.89× | 0.86× |
-| 384×2k×2k | 235 | 236 | 280 | tie | 0.84× |
+| 2k×2k×2k | 593 | 592 | 607 | tie | 0.98× |
+| 4k×4k×4k | 764 | 768 | 782 | tie | 0.98× |
+| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
+| 1k×1k×1k | 214 | 202 | 219 | **1.06×** | 0.97× |
+| 4k×512×4k | 514 | 535 | 531 | 0.96× | 0.97× |
+| 4k×8k×512 | 558 | 626 | 577 | 0.89× | 0.97× |
+| 4k×8k×256 | 423 | 440 | 438 | 0.96× | 0.97× |
+| 8k×8k×1k | 692 | 675 | 726 | **1.02×** | 0.95× |
+| 4k×8k×1k | 662 | 659 | 697 | tie | 0.95× |
+| 4k×4k×1k | 613 | 621 | 646 | tie | 0.95× |
+| 2k×2k×512 | 302 | 320 | 328 | 0.94× | 0.92× |
+| 3000×1000×2000 | 389 | 413 | 457 | 0.94× | 0.85× |
+| 384×2k×2k | 235 | 237 | 280 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 13; ours ≥ CUTLASS on 14 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 14 of 27 supported.**
 
-The honest reading is **parity**: 16 of the 27 comparable rows are statistical ties and are
-labelled as such. **`1024^3` (1.06x) is the only row clearly ahead**, and
+The honest reading is **parity**: 17 of the 27 comparable rows are statistical ties and are
+labelled as such. `1024^3` (1.06x) and a handful of large shapes lead, and
 CUTLASS takes the thin-K end (`2k x2k x512` 0.86x, `4k x8k x512` 0.89x, `4k x512x4k` 0.94x)
 -- section 14 explains why. It is bit-exact against cuBLAS on every shape it runs.
 
@@ -1328,10 +1329,52 @@ coming from somewhere other than cache residency and the optimization is misname
 
 ---
 
+## 16. Re-tuning GROUP_M under the corrected methodology
+
+Chasing why CUTLASS beat us 0.89x on `2048x2048x512` found the cause on our side: the
+GROUP_M policy picked 4 for that shape, and 1 is 19% faster.
+
+The policy in section 11 was fitted with memset operand data, a hot L2 and sequential timing
+-- all three since shown to distort results (sections 12-15). Re-sweeping GROUP_M under random
+data, cold L2 and interleaved timing moves the optimum for short-K and small-grid shapes:
+
+| shape | K | tiles_m | old policy | best | gain |
+|---|---|---|---|---|---|
+| 2048x2048x512 | 512 | 16 | GM=4 | **GM=1** | **+19%** |
+| 16384x8192x128 | 128 | 128 | GM=4 | **GM=1** | +8.9% |
+| 8192x8192x128 | 128 | 64 | GM=4 | **GM=1** | +7.4% |
+| 4096x8192x128 | 128 | 32 | GM=4 | **GM=1** | +7.1% |
+| 2048x2048x2048 | 2048 | 16 | GM=8 | **GM=1** | +7.0% |
+| 384x2048x2048 | 2048 | 3 | GM=2 | GM=1 | -0.7% |
+
+Two new arms cover it: `K <= 128 -> 1` and `tiles_m <= 16 -> 1`. Rasterizing straight down N
+wins when the k-loop is too short for L2 reuse to pay for the grouping, or when there are too
+few M-tiles for a group of 4 to mean anything (at `tiles_m = 16`, GM=4 spans a quarter of the
+grid).
+
+This must stay narrow: at `16384^3`, GM=1 measures **374 TFLOPS against 710** for GM=4. The
+rule is not "small GROUP_M is better".
+
+Validation, two independent runs, with the eight shapes whose GROUP_M is unchanged acting as a
+control group: the five improved shapes moved +6..19% both times, the one regression was
+-0.7% both times, and all eight controls landed within +/-0.5% -- so the noise floor is ~0.4 pp
+and the gains are far outside it.
+
+**The uncomfortable part.** The `K<=512`, `N<=512` and default arms are still the ones fitted
+under the distorted setup. They have not been re-derived, so they are suspect in exactly the
+way `K<=512 -> 4` turned out to be. Re-tuning the whole policy under the corrected regime is
+open work; this section fixes only the two cases where the error was large enough to find by
+accident. The autotuner exists because a four-line rule cannot cover this space.
+
+Effect on the table: `2k x2k x512` 0.89x -> 0.94x, and `2k x2k x2k`, `16k x8k x128`,
+`8k x8k x128` all move from losses to ties.
+
+---
+
 ## Final performance
 
 Summary: **parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the
-range** — 13 of 31 at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, with 16 of those 27 statistical
+range** — 14 of 31 at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, with 17 of those 27 statistical
 ties. Those counts move ±3 between measurement sessions from identical code, so read the ties
 and the direction rather than the score. `1024³` (1.06×) is the one clear win; thin-K is the clear weakness. Measured on random
 operand data, L2 flushed per launch, interleaved, one shape per process (§12); large shapes
