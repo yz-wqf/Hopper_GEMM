@@ -6,9 +6,11 @@ Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specia
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
 **Parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range.**
-16 of 31 shapes at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, of which **14 are statistical
-ties** the table marks as such. Exactly one shape is clearly ahead — `1024³` at 1.08× — and
-thin-K is a clear weakness (`2k×2k×512` 0.86×, `4k×8k×512` 0.89×). Measured with **random
+13 of 31 shapes at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, of which **16 are statistical
+ties** the table marks as such. One shape is clearly ahead — `1024³` at 1.06× — and thin-K is
+a clear weakness (`2k×2k×512` 0.89×, `4k×8k×512` 0.90×). Those counts move by ±3 between
+measurement sessions on this machine (a previous session gave 16/31 and 16/27 from the same
+code); read the ties and the direction, not the score. Measured with **random
 operand data, L2 flushed before every timed launch, interleaved timing, one shape per
 process**; see Methodology, because those four choices each moved the numbers more than any
 optimization in this repo. Full table below.
@@ -41,39 +43,39 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **469** | n/a | 144 | — | **3.26×** |
-| 4095×4095×4095 | **410** | n/a | 151 | — | **2.72×** |
-| 2k×2047×2k | **270** | n/a | 135 | — | **2.00×** |
-| 1k×1023×1k | **109** | n/a | 65 | — | **1.68×** |
-| 8k×8k×128 | **292** | 301 | 282 | 0.97× | **1.04×** |
-| 16k×8k×4k | **653** | 640 | 636 | **1.02×** | **1.03×** |
-| 8k×8k×16k | **713** | 710 | 697 | tie | **1.02×** |
-| 8k×8k×8k | **666** | 661 | 651 | tie | **1.02×** |
-| 16k×4k×8k | **664** | 658 | 650 | tie | **1.02×** |
-| 8k×8k×4k | **700** | 689 | 686 | tie | **1.02×** |
-| 8k×8k×2k | **696** | 679 | 685 | **1.02×** | **1.02×** |
+| 4k×4095×4k | **468** | n/a | 143 | — | **3.26×** |
+| 4095×4095×4095 | **408** | n/a | 150 | — | **2.71×** |
+| 2k×2047×2k | **264** | n/a | 135 | — | **1.96×** |
+| 1k×1023×1k | **108** | n/a | 65 | — | **1.66×** |
+| 8k×8k×128 | **290** | 298 | 282 | 0.97× | **1.03×** |
+| 16k×8k×4k | **650** | 638 | 635 | tie | **1.02×** |
+| 8k×8k×16k | **712** | 710 | 696 | tie | **1.02×** |
+| 16k×4k×8k | **740** | 735 | 725 | tie | **1.02×** |
+| 8k×8k×8k | **745** | 740 | 731 | tie | **1.02×** |
+| 8k×8k×4k | **698** | 689 | 686 | tie | **1.02×** |
 | 16k×8k×128 | **303** | 319 | 299 | 0.95× | **1.01×** |
-| 4k×8k×128 | **263** | 260 | 260 | tie | **1.01×** |
-| 16k×16k×16k | **666** | 668 | 659 | tie | **1.01×** |
-| 32k×8k×2k | **702** | 676 | 698 | **1.04×** | **1.01×** |
-| 1k×1k×1k | **221** | 205 | 221 | **1.08×** | **1.00×** |
-| 4k×8k×8k | 715 | 710 | 718 | tie | 1.00× |
-| 4k×4k×8k | 742 | 737 | 745 | tie | 1.00× |
-| 8k×4k×8k | 683 | 678 | 686 | tie | 1.00× |
-| 4k×4k×4k | 767 | 766 | 779 | tie | 0.98× |
-| 8k×1k×8k | 779 | 787 | 795 | tie | 0.98× |
-| 4k×512×4k | 505 | 536 | 522 | 0.94× | 0.97× |
-| 4k×8k×512 | 559 | 625 | 578 | 0.89× | 0.97× |
-| 4k×4k×1k | 624 | 621 | 646 | tie | 0.97× |
-| 4k×8k×256 | 426 | 444 | 442 | 0.96× | 0.96× |
-| 4k×8k×1k | 670 | 660 | 698 | tie | 0.96× |
-| 8k×8k×1k | 696 | 673 | 725 | **1.03×** | 0.96× |
-| 2k×2k×2k | 564 | 591 | 606 | 0.96× | 0.93× |
-| 3000×1000×2000 | 402 | 414 | 459 | 0.97× | 0.88× |
-| 384×2k×2k | 237 | 240 | 274 | tie | 0.87× |
-| 2k×2k×512 | 281 | 327 | 328 | 0.86× | 0.86× |
+| 4k×8k×128 | **260** | 259 | 259 | tie | **1.00×** |
+| 32k×8k×2k | **634** | 613 | 633 | **1.03×** | **1.00×** |
+| 16k×16k×16k | 666 | 664 | 667 | tie | 1.00× |
+| 4k×8k×8k | 682 | 678 | 686 | tie | 0.99× |
+| 8k×8k×2k | 723 | 721 | 727 | tie | 0.99× |
+| 8k×4k×8k | 746 | 737 | 752 | tie | 0.99× |
+| 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
+| 4k×4k×4k | 762 | 765 | 778 | tie | 0.98× |
+| 4k×8k×512 | 563 | 627 | 576 | 0.90× | 0.98× |
+| 4k×4k×8k | 763 | 773 | 782 | tie | 0.98× |
+| 4k×8k×256 | 430 | 446 | 442 | 0.97× | 0.97× |
+| 1k×1k×1k | 214 | 202 | 220 | **1.06×** | 0.97× |
+| 4k×512×4k | 514 | 537 | 533 | 0.96× | 0.96× |
+| 8k×8k×1k | 691 | 673 | 725 | **1.03×** | 0.95× |
+| 4k×8k×1k | 664 | 660 | 698 | tie | 0.95× |
+| 4k×4k×1k | 616 | 624 | 647 | tie | 0.95× |
+| 2k×2k×2k | 567 | 596 | 607 | 0.95× | 0.93× |
+| 3000×1000×2000 | 391 | 412 | 456 | 0.95× | 0.86× |
+| 2k×2k×512 | 280 | 314 | 327 | 0.89× | 0.86× |
+| 384×2k×2k | 235 | 236 | 280 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 13; ours ≥ CUTLASS on 14 of 27 supported.**
 
 ### Methodology (read before the numbers)
 
@@ -122,6 +124,11 @@ GEMM called once inside a larger pipeline rather than a tight loop over resident
 `nvbench` and the CUTLASS profiler both offer it. Absolute figures drop accordingly — 1024³
 reads 221 TFLOPS cold against 323 hot.
 
+**Absolutes carry ~±10% session-to-session variance.** Re-measuring the whole table on a
+different day moves individual figures by up to 12% *with no code change* — verified on shapes
+whose code path is provably identical between the two builds. Ratios measured back-to-back
+within a session are sound; absolute TFLOPS across sessions are not.
+
 **Ties are labelled.** Where the ours/CUTLASS ratio range across runs spans 1.00, or the
 margin is under 2%, the table says `tie` rather than printing a number that implies
 precision the measurement does not have. 14 of the 27 comparable rows are ties.
@@ -130,8 +137,8 @@ Rows within ~1% of each other are inside the run-to-run band on this machine: la
 drift ±50–100 TFLOPS between runs depending on clocks. Treat `0.99×`–`1.01×` as a tie and
 only the ≥1.05× and ≤0.95× entries as decided. The medians above are over 3 serial runs.
 
-Large shapes run **65–78% of the 989.4 TFLOPS** hardware peak on random data with L2
-flushed — best single figure is 4096³ at 767 TFLOPS (77.5%). On `0x11` with a hot cache the
+Large shapes run **65–79% of the 989.4 TFLOPS** hardware peak on random data with L2
+flushed — best single figure is 8192×1024×8192 at 780 TFLOPS (78.8%). On `0x11` with a hot cache the
 same code reads 864 (87.3%); that number is not wrong, it is measuring easier conditions.
 
 **On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
@@ -272,6 +279,9 @@ Compile-time, via `-D`:
 
 | macro | default | |
 |---|---|---|
+| `CFG_L2_HINT` | 1 | tag the reused operand's TMA loads `L2::evict_last` when it is small enough to pin (`≤ CFG_L2_PIN_MAX` **and** ≥`CFG_L2_PIN_RATIO`× smaller than the other), and C's stores `evict_first` so they cannot displace it. Worth ~+1.5% median across five qualifying shapes; silent elsewhere. `0` disables |
+| `CFG_L2_PIN_MAX` | 8 MB | largest operand we will try to pin. 32 MB in a 50 MB L2 measured no better than not pinning |
+| `CFG_L2_PIN_RATIO` | 4 | the other operand must be at least this much larger, or there is not enough pressure for pinning to matter |
 | `CFG_HOIST_DESC` | 1 | build the wgmma descriptor once per k-tile and reach each k16 issue with an immediate add, instead of rebuilding the 64-bit field per issue. Cuts the BN=256 wgmma region from 214 to 159 instructions; +1.6% at 1024³, +1.7% at 4k×8k×256, ~0 on large shapes. `0` restores the per-issue rebuild |
 | `CFG_STAGES` | 4 | pipeline depth for the BN=256 tile (BN=128 uses 6) |
 | `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤512`, and `N≤512` — worth 2–8% on 6 shapes |

@@ -50,4 +50,13 @@ check_off
 
 # Shadowed third-party headers used for intervention experiments; the real checkout
 # is pointed at by $(CUTLASS) and is never modified.
+l2b_*
+l2f_*
+l2g_*
+l2h_*
+l2i_*
+check_l2
+check_nol2
+check_def
+
 cutlass_patch/

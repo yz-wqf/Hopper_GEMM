@@ -115,6 +115,26 @@ namespace h100_hgemm {
 // ------------------------------------------------------------------ tuning parameters
 // Hoist the wgmma descriptor build out of the k16 loop (see the mainloop). Default on;
 // -DCFG_HOIST_DESC=0 restores the per-issue rebuild for A/B comparison.
+// L2 residency hints on the TMA descriptors (see l2_policy_* above). Default on; 0 disables.
+#ifndef CFG_L2_HINT
+#define CFG_L2_HINT 1
+#endif
+// Largest operand we will try to pin. H100 L2 is 50 MB; leave headroom for the streaming
+// operand and C's write traffic rather than trying to fill it.
+// Two conditions, both measured rather than reasoned. The operand must be small in absolute
+// terms *and* much smaller than the one being streamed past it:
+//   4096x512x4096   B=4MB   vs A=32MB  (8x)  -> +2.1%  (ranges non-overlapping over 15 A/B)
+//   4096x8192x512   A=4MB   vs B=8MB   (2x)  -> -0.4%  (nothing)
+//   32768x8192x2048 B=32MB  vs A=128MB (4x)  -> -0.2%  (nothing; B is already L2-resident
+//                                                       there via the N-major rasterization)
+// Pinning 32 MB of a 50 MB L2 leaves no room for the stream, and a 2x ratio does not create
+// enough pressure to matter.
+#ifndef CFG_L2_PIN_MAX
+#define CFG_L2_PIN_MAX (8u << 20)
+#endif
+#ifndef CFG_L2_PIN_RATIO
+#define CFG_L2_PIN_RATIO 4
+#endif
 #ifndef CFG_HOIST_DESC
 #define CFG_HOIST_DESC 1
 #endif
@@ -257,6 +277,61 @@ __device__ __forceinline__ void bar_wait(uint64_t *bar, uint32_t phase) {
       "  bra WAIT_%=;\n"
       "  DONE_%=: }" ::"r"(smem_u32(bar)),
       "r"(phase));
+}
+
+// ---------------------------------------------------------------- L2 residency control
+// Which operand should stay in L2 is a property of the shape, not the kernel. At
+// 32768x8192x2048: A is 134 MB (streamed), B is 32 MB (fits the 50 MB L2 and is re-read by
+// every one of the 256 M-tile rows), C is 537 MB written once. Left alone, C's write stream
+// evicts B. `createpolicy` + `.L2::cache_hint` lets each TMA say what it wants:
+//   A loads  -> evict_first  (streaming, do not displace anything)
+//   B loads  -> evict_last   (keep resident, it is the reused operand)
+//   C stores -> evict_first  (write-once, must not evict B)
+// The policy is selected per launch from the operand sizes, so the opposite case -- A small
+// enough to pin while B streams -- gets the mirrored assignment.
+__device__ __forceinline__ uint64_t l2_policy_evict_last() {
+  uint64_t p;
+  asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(p));
+  return p;
+}
+__device__ __forceinline__ uint64_t l2_policy_evict_first() {
+  uint64_t p;
+  asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(p));
+  return p;
+}
+// The hardware default. Marking a merely-not-pinned operand `evict_first` is actively
+// harmful -- it discards reuse that was happening on its own. Measured: shapes where no
+// operand qualifies for pinning still lost 7-8% when their loads were tagged streaming.
+__device__ __forceinline__ uint64_t l2_policy_evict_normal() {
+  uint64_t p;
+  asm volatile("createpolicy.fractional.L2::evict_normal.b64 %0, 1.0;" : "=l"(p));
+  return p;
+}
+
+__device__ __forceinline__ void tma_2d_hint(void *dst, const CUtensorMap *map, int c0, int c1,
+                                            uint64_t *bar, uint64_t policy) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+      ".L2::cache_hint [%0], [%1, {%2, %3}], [%4], %5;" ::"r"(smem_u32(dst)),
+      "l"(map), "r"(c0), "r"(c1), "r"(smem_u32(bar)), "l"(policy)
+      : "memory");
+}
+__device__ __forceinline__ void tma_2d_multicast_hint(void *dst, const CUtensorMap *map, int c0,
+                                                      int c1, uint64_t *bar, uint16_t mask,
+                                                      uint64_t policy) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+      ".multicast::cluster.L2::cache_hint [%0], [%1, {%2, %3}], [%4], %5, %6;" ::"r"(smem_u32(dst)),
+      "l"(map), "r"(c0), "r"(c1), "r"(smem_u32(bar)), "h"(mask), "l"(policy)
+      : "memory");
+}
+__device__ __forceinline__ void tma_store_2d_hint(const CUtensorMap *map, int c0, int c1,
+                                                  const void *src, uint64_t policy) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group.L2::cache_hint"
+      " [%0, {%1, %2}], [%3], %4;" ::"l"(map),
+      "r"(c0), "r"(c1), "r"(smem_u32(src)), "l"(policy)
+      : "memory");
 }
 
 __device__ __forceinline__ void tma_2d(void *dst, const CUtensorMap *map, int c0, int c1,
@@ -740,7 +815,7 @@ __device__ __forceinline__ void store_c_tile(const float *d, half *__restrict__ 
 template <int BN_>
 __device__ __forceinline__ void store_c_tile_tma(const float *d, const CUtensorMap *tmap_c,
                                                  half *sEpi, int row_base, int tile_n, int cwg,
-                                                 int lane_in_wg, float alpha) {
+                                                 int lane_in_wg, float alpha, uint64_t pol_c) {
   const int warp = lane_in_wg / 32, lane = lane_in_wg % 32;
   const int r_loc = 16 * warp + lane / 4;   // row within this WG's 64, before the +8h
   const int b = lane % 4;
@@ -773,7 +848,12 @@ __device__ __forceinline__ void store_c_tile_tma(const float *d, const CUtensorM
     asm volatile("fence.proxy.async.shared::cta;");
     wg_barrier(bar_id);
     if (lane_in_wg == 0) {
-      tma_store_2d(tmap_c, tile_n * BN_ + EPI_COLS * j, row_base, buf);
+#if CFG_L2_HINT
+      if (pol_c)
+        tma_store_2d_hint(tmap_c, tile_n * BN_ + EPI_COLS * j, row_base, buf, pol_c);
+      else
+#endif
+        tma_store_2d(tmap_c, tile_n * BN_ + EPI_COLS * j, row_base, buf);
       tma_store_commit();
     }
   }
@@ -816,6 +896,19 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
   const int tid = threadIdx.x;
   const int wg = tid / WGS;
   const int lane_in_wg = tid % WGS;
+  // Pick which operand to keep resident from the actual operand sizes: the smaller one, if
+  // it fits under the pin budget. Everything else is tagged streaming so it cannot evict it.
+  const size_t l2_bytes_a = (size_t)M * (size_t)K * sizeof(half);
+  const size_t l2_bytes_b = (size_t)K * (size_t)N * sizeof(half);
+  const bool l2_pin_b =
+      (l2_bytes_b <= CFG_L2_PIN_MAX) && (l2_bytes_b * CFG_L2_PIN_RATIO <= l2_bytes_a);
+  const bool l2_pin_a = !l2_pin_b && (l2_bytes_a <= CFG_L2_PIN_MAX) &&
+                        (l2_bytes_a * CFG_L2_PIN_RATIO <= l2_bytes_b);
+  const bool l2_pinning = l2_pin_a || l2_pin_b;
+  const uint64_t pol_a = l2_pin_a ? l2_policy_evict_last() : l2_policy_evict_normal();
+  const uint64_t pol_b = l2_pin_b ? l2_policy_evict_last() : l2_policy_evict_normal();
+  // Only push C out of the way when there is actually something to protect.
+  const uint64_t pol_c = l2_pinning ? l2_policy_evict_first() : 0ull;  // 0 == use plain store
   const uint32_t rank = (CLUSTER_M_ == 1) ? 0u : cta_rank_in_cluster();
 
   const int ctiles_m = tiles_m / CLUSTER_M_;
@@ -948,7 +1041,12 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
           const int s = it % STAGES_;
           if (it >= STAGES_) bar_wait(&bar_empty[s], ((it / STAGES_) - 1) & 1);
           bar_expect(&bar_full[s], C_::TMA_B);
-          tma_2d(sA + s * C_::A_STAGE, &tmap_a, kt * BK, tile_m * BM_, &bar_full[s]);
+#if CFG_L2_HINT
+          if (l2_pin_a)
+            tma_2d_hint(sA + s * C_::A_STAGE, &tmap_a, kt * BK, tile_m * BM_, &bar_full[s], pol_a);
+          else
+#endif
+            tma_2d(sA + s * C_::A_STAGE, &tmap_a, kt * BK, tile_m * BM_, &bar_full[s]);
           // B is N-major: the tile arrives as B_BLOCKS contiguous [BK][64] blocks. Under a
           // cluster each CTA multicasts its share of the blocks to the whole cluster.
           half *bdst = sB + s * C_::B_STAGE;
@@ -957,10 +1055,21 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
             const int blk = rank * BLOCKS_PER_CTA + j;
             const int ncol = tile_n * BN_ + blk * 64;
             if constexpr (CLUSTER_M_ == 1) {
-              tma_2d(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK, &bar_full[s]);
+#if CFG_L2_HINT
+              if (l2_pin_b)
+                tma_2d_hint(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK, &bar_full[s], pol_b);
+              else
+#endif
+                tma_2d(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK, &bar_full[s]);
             } else {
-              tma_2d_multicast(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK, &bar_full[s],
-                               MC_MASK);
+#if CFG_L2_HINT
+              if (l2_pin_b)
+                tma_2d_multicast_hint(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK,
+                                      &bar_full[s], MC_MASK, pol_b);
+              else
+#endif
+                tma_2d_multicast(bdst + blk * B_BLOCK_ELEMS, &tmap_b, ncol, kt * BK, &bar_full[s],
+                                 MC_MASK);
             }
           }
         }
@@ -981,6 +1090,9 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
       for (int i = 0; i < C_::NREG; ++i) d[i] = 0.0f;
       wgmma_fence();
 
+#if CFG_L2_HINT
+      (void)0;
+#endif
       int prev_stage = -1;
       for (int kt = 0; kt < num_k_tiles; ++kt, ++it) {
         const int s = it % STAGES_;
@@ -1040,7 +1152,7 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
 
       if (tma_epilogue) {
         store_c_tile_tma<BN_>(d, &tmap_c, sEpi, tile_m * BM_ + cwg * WG_M, tile_n, cwg, lane_in_wg,
-                              alpha);
+                              alpha, pol_c);
       } else {
         store_c_tile<C_::NREG>(d, C, M, N, tile_m * BM_ + cwg * WG_M, tile_n * BN_, lane_in_wg,
                                alpha, beta);

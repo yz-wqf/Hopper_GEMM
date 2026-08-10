@@ -36,7 +36,8 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 12 | Cross-check vs per-shape-tuned CUTLASS 4.7 | **parity**: 16/27 ≥, 14 ties; only `1024³` (1.08×) clearly ahead |
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
-| — | **Final** | **parity**: 16/31 ≥ cuBLAS, 16/27 ≥ tuned CUTLASS (14 ties), 65–78% of peak, random data + cold L2 |
+| 15 | L2 residency hints on TMA | **+1.5%** median on qualifying shapes |
+| — | **Final** | **parity**: 13/31 ≥ cuBLAS, 14/27 ≥ tuned CUTLASS (16 ties), 65–79% of peak, random data + cold L2 |
 
 ---
 
@@ -948,42 +949,42 @@ runs them in place.
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **469** | n/a | 144 | — | **3.26×** |
-| 4095×4095×4095 | **410** | n/a | 151 | — | **2.72×** |
-| 2k×2047×2k | **270** | n/a | 135 | — | **2.00×** |
-| 1k×1023×1k | **109** | n/a | 65 | — | **1.68×** |
-| 8k×8k×128 | **292** | 301 | 282 | 0.97× | **1.04×** |
-| 16k×8k×4k | **653** | 640 | 636 | **1.02×** | **1.03×** |
-| 8k×8k×16k | **713** | 710 | 697 | tie | **1.02×** |
-| 8k×8k×8k | **666** | 661 | 651 | tie | **1.02×** |
-| 16k×4k×8k | **664** | 658 | 650 | tie | **1.02×** |
-| 8k×8k×4k | **700** | 689 | 686 | tie | **1.02×** |
-| 8k×8k×2k | **696** | 679 | 685 | **1.02×** | **1.02×** |
+| 4k×4095×4k | **468** | n/a | 143 | — | **3.26×** |
+| 4095×4095×4095 | **408** | n/a | 150 | — | **2.71×** |
+| 2k×2047×2k | **264** | n/a | 135 | — | **1.96×** |
+| 1k×1023×1k | **108** | n/a | 65 | — | **1.66×** |
+| 8k×8k×128 | **290** | 298 | 282 | 0.97× | **1.03×** |
+| 16k×8k×4k | **650** | 638 | 635 | tie | **1.02×** |
+| 8k×8k×16k | **712** | 710 | 696 | tie | **1.02×** |
+| 16k×4k×8k | **740** | 735 | 725 | tie | **1.02×** |
+| 8k×8k×8k | **745** | 740 | 731 | tie | **1.02×** |
+| 8k×8k×4k | **698** | 689 | 686 | tie | **1.02×** |
 | 16k×8k×128 | **303** | 319 | 299 | 0.95× | **1.01×** |
-| 4k×8k×128 | **263** | 260 | 260 | tie | **1.01×** |
-| 16k×16k×16k | **666** | 668 | 659 | tie | **1.01×** |
-| 32k×8k×2k | **702** | 676 | 698 | **1.04×** | **1.01×** |
-| 1k×1k×1k | **221** | 205 | 221 | **1.08×** | **1.00×** |
-| 4k×8k×8k | 715 | 710 | 718 | tie | 1.00× |
-| 4k×4k×8k | 742 | 737 | 745 | tie | 1.00× |
-| 8k×4k×8k | 683 | 678 | 686 | tie | 1.00× |
-| 4k×4k×4k | 767 | 766 | 779 | tie | 0.98× |
-| 8k×1k×8k | 779 | 787 | 795 | tie | 0.98× |
-| 4k×512×4k | 505 | 536 | 522 | 0.94× | 0.97× |
-| 4k×8k×512 | 559 | 625 | 578 | 0.89× | 0.97× |
-| 4k×4k×1k | 624 | 621 | 646 | tie | 0.97× |
-| 4k×8k×256 | 426 | 444 | 442 | 0.96× | 0.96× |
-| 4k×8k×1k | 670 | 660 | 698 | tie | 0.96× |
-| 8k×8k×1k | 696 | 673 | 725 | **1.03×** | 0.96× |
-| 2k×2k×2k | 564 | 591 | 606 | 0.96× | 0.93× |
-| 3000×1000×2000 | 402 | 414 | 459 | 0.97× | 0.88× |
-| 384×2k×2k | 237 | 240 | 274 | tie | 0.87× |
-| 2k×2k×512 | 281 | 327 | 328 | 0.86× | 0.86× |
+| 4k×8k×128 | **260** | 259 | 259 | tie | **1.00×** |
+| 32k×8k×2k | **634** | 613 | 633 | **1.03×** | **1.00×** |
+| 16k×16k×16k | 666 | 664 | 667 | tie | 1.00× |
+| 4k×8k×8k | 682 | 678 | 686 | tie | 0.99× |
+| 8k×8k×2k | 723 | 721 | 727 | tie | 0.99× |
+| 8k×4k×8k | 746 | 737 | 752 | tie | 0.99× |
+| 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
+| 4k×4k×4k | 762 | 765 | 778 | tie | 0.98× |
+| 4k×8k×512 | 563 | 627 | 576 | 0.90× | 0.98× |
+| 4k×4k×8k | 763 | 773 | 782 | tie | 0.98× |
+| 4k×8k×256 | 430 | 446 | 442 | 0.97× | 0.97× |
+| 1k×1k×1k | 214 | 202 | 220 | **1.06×** | 0.97× |
+| 4k×512×4k | 514 | 537 | 533 | 0.96× | 0.96× |
+| 8k×8k×1k | 691 | 673 | 725 | **1.03×** | 0.95× |
+| 4k×8k×1k | 664 | 660 | 698 | tie | 0.95× |
+| 4k×4k×1k | 616 | 624 | 647 | tie | 0.95× |
+| 2k×2k×2k | 567 | 596 | 607 | 0.95× | 0.93× |
+| 3000×1000×2000 | 391 | 412 | 456 | 0.95× | 0.86× |
+| 2k×2k×512 | 280 | 314 | 327 | 0.89× | 0.86× |
+| 384×2k×2k | 235 | 236 | 280 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 13; ours ≥ CUTLASS on 14 of 27 supported.**
 
-The honest reading is **parity**: 14 of the 27 comparable rows are statistical ties and are
-labelled as such. **`1024^3` (1.08x, range 1.07-1.09) is the only row clearly ahead**, and
+The honest reading is **parity**: 16 of the 27 comparable rows are statistical ties and are
+labelled as such. **`1024^3` (1.06x) is the only row clearly ahead**, and
 CUTLASS takes the thin-K end (`2k x2k x512` 0.86x, `4k x8k x512` 0.89x, `4k x512x4k` 0.94x)
 -- section 14 explains why. It is bit-exact against cuBLAS on every shape it runs.
 
@@ -1250,13 +1251,65 @@ methodology is written up in the `gpu-perf-root-cause` skill.
 
 ---
 
+## 15. L2 residency control on the TMA descriptors
+
+Which operand deserves to stay in L2 is a property of the shape, not the kernel. PTX exposes
+this directly: `createpolicy` builds a cache policy and `cp.async.bulk.tensor` accepts it via
+`.L2::cache_hint`, so each TMA can state its intent. In SASS the descriptor shows up as an
+extra operand:
+
+```
+  without:  UTMALDG.2D [UR12], [UR10]
+  with:     UTMALDG.2D [UR12], [UR10], desc[UR6]
+```
+
+The shipped policy pins the smaller operand as `evict_last` when it is `<= 8 MB` **and**
+`>= 4x` smaller than the other, and marks C's stores `evict_first` so the 500 MB write stream
+cannot displace it. Everything else emits the plain instruction.
+
+**Every intuitive version of this was wrong, and measurably so.**
+
+| design | result |
+|---|---|
+| pin reused operand, mark the other `evict_first` | **-16%** on `4096x8192x512` |
+| as above but non-pinned gets explicit `evict_normal` | **-27%** on `1024^3` |
+| descriptor **only** on the pinned operand, plain instructions elsewhere | **+1.5%** median |
+
+Two lessons in that table. Marking an operand `evict_first` destroys reuse that was happening
+for free -- shapes where *no* operand qualified for pinning still lost 6-8%, and those tag
+nothing as resident. And an explicit `evict_normal` policy is **not** equivalent to no policy:
+carrying the descriptor at all costs something, enough to lose 27% at `1024^3`.
+
+Validation across five shapes that satisfy the gate, plus a control whose code path is
+provably identical in both builds:
+
+| shape | A/B | ratio | delta | ranges |
+|---|---|---|---|---|
+| 4096x512x4096 | 32/4 MB | 8x | **+2.1%** | non-overlapping |
+| 16384x256x8192 | 256/4 MB | 64x | **+1.6%** | non-overlapping |
+| 2048x8192x256 | 1/4 MB | 4x | +1.5% | overlap |
+| 4096x256x4096 | 32/2 MB | 16x | +1.2% | overlap |
+| 8192x512x8192 | 128/8 MB | 16x | -0.1% | overlap |
+| 4096x4096x1024 (control) | 8/8 MB | 1x | -0.3% | overlap |
+
+Median +1.5%, control -0.3%. The null case is `8192x512x8192`, whose 8 MB operand sits exactly
+at the cap -- the cap is probably still too loose, but moving it on one observation is how the
+other three tuning mistakes in this report happened.
+
+**It does nothing on the shape that motivated it.** `32768x8192x2048` is -0.2%: B is 32 MB,
+already L2-resident there because the N-major rasterization sweeps it once per M-row, so there
+was never headroom. The wins came from shapes nobody was looking at.
+
+---
+
 ## Final performance
 
 Summary: **parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the
-range** — 16 of 31 at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, with 14 of those 27 statistical
-ties. `1024³` (1.08×) is the one clear win; thin-K is the clear weakness. Measured on random
+range** — 13 of 31 at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, with 16 of those 27 statistical
+ties. Those counts move ±3 between measurement sessions from identical code, so read the ties
+and the direction rather than the score. `1024³` (1.06×) is the one clear win; thin-K is the clear weakness. Measured on random
 operand data, L2 flushed per launch, interleaved, one shape per process (§12); large shapes
-run 65–78% of the 989.4 TFLOPS peak, best 4096³ at 767 (77.5%). The same code reads 864 on
+run 65–79% of the 989.4 TFLOPS peak, best 8192×1024×8192 at 780 (78.8%). The same code reads 864 on
 `0x11` with a hot cache — that is the measurement conditions, not the kernel.
 
 **On reading these numbers.** Rows within ~1% are inside the run-to-run band; only ≥1.05×

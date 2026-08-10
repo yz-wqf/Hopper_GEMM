@@ -6,7 +6,7 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
 Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
-at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (16/27 ≥, 14 ties; one clear win at 1024³, 1.08×), up to
+at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (14/27 ≥, 16 ties; one clear win at 1024³), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -546,8 +546,10 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
 Result (tuning both **per shape**; random data, L2 flushed per launch, interleaved, one shape
-per process): **parity** — 16 of 27 at or above CUTLASS, 14 of those 27 statistical ties, and
-only `1024³` (1.08×) clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one.
+per process): **parity** — 14 of 27 at or above CUTLASS, 16 of those 27 statistical ties, and
+only `1024³` clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one. Those
+counts move ±3 between measurement sessions from identical code, so report the ties and the
+direction rather than the score.
 
 **Four measurement choices dominated every optimization in the project.** Operand data is
 worth up to 19% (all-zero 906 TFLOPS vs full-entropy random 761 on identical code — zero
@@ -675,6 +677,37 @@ regime where a non-persistent launch or a lighter prologue path would win.
 The distinguishing test is cheap: a K-sweep at fixed M,N. **Ratio flat, absolute gap
 growing** = per-iteration cost. **Ratio converging, absolute gap flat** = fixed per-tile
 cost. Two different root causes that look identical if you only look at one shape.
+
+---
+
+## L2 residency control via TMA cache hints
+
+PTX lets each TMA state its cache intent: `createpolicy` builds a policy, and
+`cp.async.bulk.tensor` takes it through `.L2::cache_hint`. In SASS it becomes an extra
+operand — `UTMALDG.2D [UR12], [UR10], desc[UR6]`.
+
+Worth **~+1.5% median** on shapes with a small reused operand, and **nothing** elsewhere. The
+gate that survived measurement: pin the smaller operand only if it is `≤8 MB` **and** `≥4×`
+smaller than the other.
+
+**Every intuitive version of this loses, badly:**
+
+| design | result |
+|---|---|
+| pin the reused operand, mark the other `evict_first` | **−16%** |
+| non-pinned operands get explicit `evict_normal` | **−27%** at 1024³ |
+| descriptor **only** on the pinned operand, plain instructions elsewhere | **+1.5%** |
+
+Two non-obvious facts behind that. Marking an operand `evict_first` destroys reuse that was
+happening for free — shapes where *nothing* qualified for pinning still lost 6–8%, and those
+tag nothing as resident. And an explicit `evict_normal` policy is **not** the same as no
+policy: carrying the descriptor operand at all has a cost.
+
+**Check whether the operand is already resident before trying to pin it.** The shape that
+motivated this work (`32768×8192×2048`, B = 32 MB in a 50 MB L2) gained −0.2%, because the
+N-major rasterization already sweeps B once per M-row and keeps it cached. The wins came from
+shapes with 2–4 MB operands, which is a different regime entirely. Compute A, B and C in bytes
+against the L2 size before writing any code.
 
 ---
 
