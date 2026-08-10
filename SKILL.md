@@ -514,6 +514,21 @@ Two arms that did survive scrutiny, and one warning: `K <= 128 -> GROUP_M=1` and
 reuse to pay for grouping, or when there are too few M-tiles for a group of 4 to mean
 anything). Keep it narrow — at 16384³, GROUP_M=1 measures **374 TFLOPS against 710**.
 
+**Get the work hierarchy straight before reasoning about rasterization.** Four levels, easy to
+conflate:
+
+| level | what it is |
+|---|---|
+| **CTA** | one `BM×BN` output tile — the unit the hardware schedules onto an SM |
+| **cluster** | `CLUSTER_M` CTAs stacked in M at the *same* `tile_n`, sharing one multicast B tile. **The unit of work assignment** — schedulers hand out clusters, not CTAs |
+| **`w`** | linear index into the flat cluster-tile list, `(tiles_m/CLUSTER_M) × tiles_n` long |
+| **group** | band of the tile grid, `GROUP_M/CLUSTER_M` cluster-rows tall × all `tiles_n` wide. A numbering device only |
+
+The persistent loop `for (w = my_cluster; w < total; w += num_clusters)` means **the resident
+clusters always hold `num_clusters` consecutive `w`**. That single fact is why ordering
+controls L2 residency: `GROUP_M = g` makes the concurrent tiles a `g × (SM/g)` rectangle,
+needing `g` A-tiles and `SM/g` B-tiles at once.
+
 **The optimal rasterization group is shape-independent — derive it, don't fit it.** Writing
 out DRAM traffic under GROUP_M=g with SM concurrent CTAs (resident window `g` × `SM/g` tiles):
 
@@ -527,8 +542,21 @@ C contributes nothing to the optimum: it is written once and its resident footpr
 **16.2 at BN=256, 8.1 at BN=64**, and that matched the measured best on 5/5 shapes where
 re-fetching actually happens, including the one on a different tile.
 
-It goes silent where A+B fits in L2 — no re-fetching to optimise, so traffic stops depending
-on g. That is where empirical arms are needed, and where they are only ever local facts.
+It goes silent where **A+B fits in L2** — no re-fetching to optimise, so traffic stops
+depending on g. In the worked example every shape whose optimum was `g=1` had `A+B ≤ 16 MB`
+against a 50 MB L2, five for five with no exceptions. That is the root cause in one line: both
+operands are co-resident, nothing is re-fetched, so there is no re-fetch traffic to reduce.
+
+**Test `A+B`, not `A+B+C`.** C is write-once — it never needs residency, it just streams out.
+Three of those five shapes carried 64–256 MB of C and plainly did not fit; including C would
+have wrongly predicted grouping for all three.
+
+**It is necessary, not sufficient.** Six other shapes also fit (6–32 MB) and still preferred
+grouping. As a predictor it scores 9/15 against 10/15 for "always group" — so use it to explain
+*why grouping cannot help*, never to decide the value. Fitting is not staying: a 64–160 MB C
+write stream flows through the same L2 and evicts the operands, so real residency depends on
+reuse distance, not operand size. That is why empirical arms are still needed there, and why
+they are only ever local facts.
 
 **Sweeping N configurations is not the same experiment as sweeping 2.** The same GROUP_M=4
 measured 265 when rotated against GM=1 and 290–297 when rotated against 5 values, a 12% swing

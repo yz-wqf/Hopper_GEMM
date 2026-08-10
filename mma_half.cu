@@ -926,6 +926,47 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
 
   const int num_k_tiles = (K + BK - 1) / BK;
 
+  // ── The four levels of work decomposition ────────────────────────────────
+  // Easy to conflate, so stated once, outermost to innermost:
+  //
+  //   CTA      one BM x BN output tile of C. 384 threads: 1 producer + 2 consumer
+  //            warpgroups. This is the unit the hardware schedules onto an SM.
+  //
+  //   cluster  CLUSTER_M_ CTAs stacked along M at the SAME tile_n. They consume the
+  //            identical B tile, so one TMA multicast fills all of them -- that is the
+  //            whole reason clusters exist here. A cluster is the unit of *work
+  //            assignment*: the loop below hands out clusters, not CTAs.
+  //
+  //   w        linear index into the flat list of cluster-tiles,
+  //            total_ctiles = (tiles_m / CLUSTER_M_) * tiles_n. `decode(w)` turns it
+  //            into (tile_m, tile_n). The persistent loop is
+  //                for (w = my_cluster; w < total_ctiles; w += num_clusters)
+  //            so cluster 0 takes w = 0, 66, 132..., cluster 1 takes 1, 67, 133...
+  //            KEY CONSEQUENCE: at any instant the num_clusters resident clusters hold
+  //            num_clusters *consecutive* values of w. The ORDER of w therefore decides
+  //            which tiles are co-resident, hence what hits in L2. That is the only
+  //            thing group-M rasterization controls.
+  //
+  //   group    a band of the C tile grid, cgroup_m cluster-rows tall by ALL tiles_n
+  //            columns, where cgroup_m = GROUP_M / CLUSTER_M_. Purely a numbering
+  //            device -- no hardware knows it exists. It fixes the order of w.
+  //
+  //   containment:  group  >  cluster  >  CTA
+  //                 one group = cgroup_m * tiles_n clusters
+  //                           = cgroup_m * tiles_n * CLUSTER_M_ CTAs
+  //
+  // Why the group height matters. With SM CTAs resident, the concurrently-executing
+  // tiles form a GROUP_M x (SM/GROUP_M) rectangle of the C grid. Those CTAs together
+  // need GROUP_M A-tiles (one per M row) and SM/GROUP_M B-tiles (one per N column), so
+  // the bytes they share is  GROUP_M*BM*K + (SM/GROUP_M)*BN*K.  Minimising that:
+  //
+  //     g* = sqrt(SM * BN / BM)      -- M, N and K all cancel; see report section 16
+  //        = 16.2  at BN=256,  8.1 at BN=64   (SM=132, BM=128)
+  //
+  // ...but only where re-fetching actually happens. When A+B fits in L2 both operands
+  // stay resident, nothing is ever re-read, and the rasterization order has no traffic
+  // to reduce -- which is why the short-K and small-grid arms of the policy pick 1.
+  //
   // Decode a linear work index w into this CTA's (tile_m, tile_n).
   //
   // ── Group-M rasterization ────────────────────────────────────────────────

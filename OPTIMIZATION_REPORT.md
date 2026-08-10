@@ -802,6 +802,55 @@ static_assert(C_::BLOCKS >= CLUSTER_M_ && C_::BLOCKS % CLUSTER_M_ == 0,
 
 ## 11. Per-shape `GROUP_M` policy
 
+### First, what the four levels actually are
+
+Easy to conflate, and the rest of this section is unreadable without them:
+
+| level | what it is |
+|---|---|
+| **CTA** | one `BM x BN` output tile of C. 384 threads = 1 producer + 2 consumer warpgroups. The unit the hardware puts on an SM. |
+| **cluster** | `CLUSTER_M` CTAs stacked along M at the **same** `tile_n`. They consume the identical B tile, so one TMA multicast fills all of them -- the entire reason clusters exist here. **This is the unit of work assignment**: the scheduler hands out clusters, not CTAs. |
+| **`w`** | linear index into the flat list of cluster-tiles, `total_ctiles = (tiles_m / CLUSTER_M) * tiles_n`. `decode(w)` yields `(tile_m, tile_n)`. |
+| **group** | a band of the C tile grid, `cgroup_m` cluster-rows tall by **all** `tiles_n` columns, with `cgroup_m = GROUP_M / CLUSTER_M`. Purely a numbering device; no hardware knows it exists. It fixes the order of `w`. |
+
+```
+  group  >  cluster  >  CTA
+  one group = cgroup_m * tiles_n clusters = cgroup_m * tiles_n * CLUSTER_M CTAs
+```
+
+The persistent loop is
+
+```cpp
+for (int w = my_cluster; w < total_ctiles; w += num_clusters)   // num_clusters = 132/2 = 66
+```
+
+so cluster 0 takes `w = 0, 66, 132...`, cluster 1 takes `1, 67, 133...`. **The consequence that
+matters: at any instant the 66 resident clusters hold 66 *consecutive* values of `w`.** So the
+order of `w` decides which tiles are co-resident, hence what hits in L2 -- and that ordering is
+the only thing `GROUP_M` controls.
+
+Concretely, for `GROUP_M = g` the concurrently-executing tiles form a `g x (SM/g)` rectangle of
+the C grid. Those CTAs together need `g` A-tiles (one per M row) and `SM/g` B-tiles (one per N
+column):
+
+```
+        g = 1                        g = 4
+   ┌──┬──┬──┬──┬──┐            ┌──┬──┬──┐
+   │  │  │  │  │  │  ...       │  │  │  │        1 A-tile, many B-tiles   (g=1)
+   └──┴──┴──┴──┴──┘            ├──┼──┼──┤        vs
+    one M row, many N          │  │  │  │        4 A-tiles, fewer B-tiles (g=4)
+                               ├──┼──┼──┤
+                               │  │  │  │
+                               ├──┼──┼──┤
+                               │  │  │  │
+                               └──┴──┴──┘
+```
+
+Section 16 derives the optimum of that trade (`g* = sqrt(SM * BN / BM)`) and the condition
+under which it stops applying.
+
+
+
 Step 2 established that `GROUP_M` is a live knob but left it at a single global default of 8.
 The obvious follow-up is to pick it per shape. The interesting part is what stopped that from
 becoming a lookup table.
@@ -1390,6 +1439,38 @@ model's premise holds -- i.e. wherever re-fetching actually happens:
 | 384x2048x2048 | **64** | **8.1** | **8** |
 
 Five for five, including the one shape on a different tile.
+
+### The residency criterion: A+B, not A+B+C
+
+Where the model falls silent is sharp and worth stating as a rule. **Every shape whose optimum
+is `g=1` has `A + B <= 16 MB` against a 50 MB L2 -- five for five, no exceptions:**
+
+| shape | A+B | A+B+C | best g |
+|---|---|---|---|
+| 2048x2048x512 | **4 MB** | 12 MB | 1 |
+| 4096x8192x128 | **3 MB** | 67 MB | 1 |
+| 8192x8192x128 | **4 MB** | 132 MB | 1 |
+| 16384x8192x128 | **6 MB** | 262 MB | 1 |
+| 2048x2048x2048 | **16 MB** | 24 MB | 1 |
+| 4096x4096x4096 | 64 MB | 96 MB | 16 |
+| 8192x8192x4096 | 128 MB | 256 MB | 16 |
+| 32768x8192x2048 | 160 MB | 672 MB | 16 |
+| 16384x16384x16384 | 1024 MB | 1536 MB | 4 |
+
+Both operands are co-resident, so nothing is ever re-fetched, so there is no re-fetch traffic
+for rasterization to reduce. That is the root cause, stated in one line.
+
+**C must be excluded from the criterion.** C is write-once -- it never needs to be resident, it
+just streams out. Three of the five `g=1` shapes carry 64-256 MB of C and obviously do not fit;
+testing `A+B+C` would wrongly predict grouping for all three.
+
+**It is necessary, not sufficient.** Six shapes also have `A+B <= 32 MB` and still prefer
+grouping (`4096x8192x256` at 6 MB, `4096x8192x512` at 12 MB, `3000x1000x2000` at 15 MB,
+`8192x8192x1024` at 32 MB). Scored as a predictor it gets 9/15, against 10/15 for the trivial
+"always group" baseline. So `A+B <= L2` explains **why grouping cannot help** on the shapes it
+covers; it does not predict where grouping still helps anyway. The likely reason is that
+*fitting* is not *staying*: C pushes 64-160 MB of writes through the same L2 and evicts them,
+so real residency depends on reuse distance, not just operand size.
 
 Where it fails is where the premise fails: if A+B fits in L2 there is no re-fetching to
 optimise, traffic stops depending on g, and the model is silent. All five GM=1 shapes have
