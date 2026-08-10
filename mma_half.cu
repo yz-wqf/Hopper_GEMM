@@ -116,6 +116,16 @@ namespace h100_hgemm {
 // Hoist the wgmma descriptor build out of the k16 loop (see the mainloop). Default on;
 // -DCFG_HOIST_DESC=0 restores the per-issue rebuild for A/B comparison.
 // L2 residency hints on the TMA descriptors (see l2_policy_* above). Default on; 0 disables.
+// Minimum K for the 2-CTA cluster to pay for itself; see the derivation at its use site.
+#ifndef CFG_CLUSTER_MIN_K
+#define CFG_CLUSTER_MIN_K 2048
+#endif
+#ifndef CFG_CLUSTER_MIN_TM
+#define CFG_CLUSTER_MIN_TM 32
+#endif
+#ifndef CFG_CLUSTER_NARROW_N
+#define CFG_CLUSTER_NARROW_N 4
+#endif
 #ifndef CFG_L2_HINT
 #define CFG_L2_HINT 1
 #endif
@@ -142,7 +152,7 @@ namespace h100_hgemm {
 #define CFG_STAGES 4
 #endif
 #ifndef CFG_GROUP_M
-#define CFG_GROUP_M 8
+#define CFG_GROUP_M 16
 #endif
 #ifndef CFG_CONSUMER_REGS
 #define CFG_CONSUMER_REGS 232
@@ -1315,8 +1325,35 @@ static bool launch_tile(const half *A, const half *B, half *C, int M, int N, int
   // zero blocks, B would never arrive, and the consumers would hang on bar_full. Decide that
   // at compile time so the impossible instantiation is never even formed.
   constexpr int CM = (C_::BLOCKS >= CLUSTER_M && C_::BLOCKS % CLUSTER_M == 0) ? CLUSTER_M : 1;
-  const bool use_cluster = (CM > 1) && (tiles_m % CM == 0) && (group_m % CM == 0);
-  const int cgroup_m = use_cluster ? (group_m / CM) : group_m;
+  // Whether to cluster is a SHAPE decision, and until now it was an accident: the old
+  // condition included `group_m % CM == 0`, so any odd GROUP_M silently took the
+  // non-clustered launch below. That coupling meant "no cluster" could only be requested by
+  // also giving up grouping, and the two are independent.
+  //
+  // The cluster's cost is per tile (cluster launch, cluster_sync, mbarriers that must collect
+  // CONSUMERS*CLUSTER_M arrivals). Its benefit -- halving B's L2->SM traffic by multicasting
+  // one B tile to both CTAs -- is per k-tile. So it needs a long enough k-loop to pay for
+  // itself. Measured at matched M-grouping, cluster on vs off:
+  //
+  //   K=256   4096x8192x256      -5.2%      K=2048   32768x8192x2048   +11.7%
+  //   K=512   2048x2048x512     -11.3%      K=4096   8192x8192x4096     +3.6%
+  //   K=512   4096x8192x512      -2.5%      K=8192   8192x1024x8192    +27.8%
+  //   K=4096  4096x4096x4096     -0.6%      K=16384  16384x16384x16384  0.0%
+  //
+  // But K alone does not separate: at K=2048 the cluster is +7.6% on 32768x8192x2048
+  // (tiles_m=256) and -8.4% on 2048x2048x2048 (tiles_m=16). It needs enough M-tiles for the
+  // multicast to be reused as well as enough k-tiles to amortise the setup, so both:
+  //   K >= CFG_CLUSTER_MIN_K  and  tiles_m >= CFG_CLUSTER_MIN_TM
+  const bool cluster_ok   = (CM > 1) && (tiles_m % CM == 0);
+  // Third case: a narrow N. B is re-read once per M-tile row, so with few N-tiles that
+  // traffic dominates and halving it pays regardless of K. 3000x1000x2000 (tiles_n=4) loses
+  // 14.6pp without the cluster; 8192x1024x8192 (tiles_n=4) gains 27.8% with it.
+  const bool cluster_want = ((K >= CFG_CLUSTER_MIN_K) && (tiles_m >= CFG_CLUSTER_MIN_TM))
+                            || (tiles_n <= CFG_CLUSTER_NARROW_N);
+  const bool use_cluster  = cluster_ok && cluster_want;
+  // Grouping is in cluster-rows when clustered, tile-rows when not. Round down rather than
+  // rejecting odd values -- GROUP_M must not decide clustering any more.
+  const int cgroup_m = use_cluster ? max(1, group_m / CM) : group_m;
 
   CUtensorMap tmap_a, tmap_b, tmap_c;
   if (!make_tensor_map(&tmap_a, A, M, K, BM_, BK, lda) ||
@@ -1377,10 +1414,8 @@ bool launch_mainloop(const half *A, const half *B, half *C, int M, int N, int K,
   // The policy below lives in the #else branch, so resolve the auto sentinel here too --
   // passing group_m == 0 through would make group_sz zero and divide by zero in the decode.
   if (group_m == 0) {
-    const int tiles_m = (M + 127) / 128;
     if (CFG_FORCE_BN == 64)  group_m = 2;
     else if (K <= 128)       group_m = 1;
-    else if (tiles_m <= 16)  group_m = 1;
     else if (K <= 512)       group_m = 4;
     else if (N <= 512)       group_m = 16;
     else                     group_m = GROUP_M;
@@ -1431,16 +1466,17 @@ bool launch_mainloop(const half *A, const half *B, half *C, int M, int N, int K,
   // group_m == 0 means "auto"; any explicit value (from the autotuner, or a benchmark
   // pinning the old behaviour) overrides the policy.
   if (group_m == 0) {
-    const int tiles_m = (M + 127) / 128;
     if (bn == 64)            group_m = 2;
-    // Very short k-loop, or too few M-tiles for grouping to mean anything: rasterize
-    // straight down N. Measured under random data + cold L2 + interleaved timing, which is
-    // NOT the regime the rest of this policy was fitted in -- see the note below.
-    else if (K <= 128)       group_m = 1;   // 3/3 K=128 shapes, +6..9%
-    else if (tiles_m <= 16)  group_m = 1;   // 2048x2048x512 +19%, 2048x2048x2048 +2%
+    // Very short k-loop: grouping has almost nothing to amortise, and measured best is 1-4
+    // across the three K=128 shapes.
+    else if (K <= 128)       group_m = 1;
     else if (K <= 512)       group_m = 4;
     else if (N <= 512)       group_m = 16;
     else                     group_m = GROUP_M;
+    // NOTE: an earlier `tiles_m <= 16 -> 1` arm lived here. It was fitted when an odd
+    // GROUP_M silently disabled clustering, so what it actually bought was "no cluster",
+    // not "no grouping". With the cluster decision decoupled (see use_cluster) the arm has
+    // no rationale and measures within 1% of the default, so it is gone.
   }
 
   if (bn == 256)

@@ -6,7 +6,7 @@ Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specia
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
 **Parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range.**
-14 of 31 shapes at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, of which **18 are statistical
+16 of 31 shapes at ≥1.00× cuBLAS, 18 of 27 at ≥ CUTLASS, of which **16 are statistical
 ties** the table marks as such. `1024³` (1.06×) and a few large shapes lead; the remaining
 weakness is thin-K (`4k×8k×512` 0.89×, `2k×2k×512` 0.94×). Those counts move by ±3 between
 measurement sessions on this machine (a previous session gave 16/31 and 16/27 from the same
@@ -43,39 +43,39 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **467** | n/a | 143 | — | **3.26×** |
-| 4095×4095×4095 | **408** | n/a | 150 | — | **2.71×** |
-| 2k×2047×2k | **273** | n/a | 135 | — | **2.02×** |
-| 1k×1023×1k | **109** | n/a | 65 | — | **1.66×** |
-| 16k×8k×128 | **320** | 320 | 299 | tie | **1.07×** |
-| 8k×8k×128 | **300** | 294 | 283 | tie | **1.06×** |
-| 16k×8k×4k | **650** | 641 | 636 | tie | **1.03×** |
-| 8k×8k×16k | **713** | 718 | 704 | tie | **1.02×** |
-| 4k×8k×128 | **266** | 259 | 261 | **1.02×** | **1.02×** |
-| 16k×4k×8k | **688** | 661 | 651 | tie | **1.02×** |
-| 8k×8k×8k | **710** | 703 | 695 | tie | **1.02×** |
-| 16k×16k×16k | **660** | 676 | 659 | tie | **1.02×** |
-| 8k×8k×4k | **727** | 717 | 714 | tie | **1.02×** |
-| 32k×8k×2k | **714** | 685 | 711 | **1.04×** | **1.00×** |
-| 8k×4k×8k | 706 | 702 | 710 | tie | 0.99× |
-| 8k×8k×2k | 734 | 730 | 739 | tie | 0.99× |
-| 4k×8k×8k | 748 | 738 | 753 | tie | 0.99× |
-| 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
-| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
-| 2k×2k×2k | 593 | 592 | 607 | tie | 0.98× |
-| 4k×4k×4k | 764 | 768 | 782 | tie | 0.98× |
-| 1k×1k×1k | 214 | 202 | 219 | **1.05×** | 0.97× |
-| 4k×512×4k | 514 | 535 | 531 | 0.97× | 0.97× |
-| 4k×8k×512 | 558 | 626 | 577 | 0.89× | 0.97× |
-| 4k×8k×256 | 423 | 440 | 438 | 0.96× | 0.97× |
-| 8k×8k×1k | 692 | 675 | 726 | **1.02×** | 0.95× |
-| 4k×8k×1k | 662 | 659 | 697 | tie | 0.95× |
-| 4k×4k×1k | 613 | 621 | 646 | tie | 0.95× |
-| 2k×2k×512 | 302 | 320 | 328 | 0.94× | 0.92× |
-| 3000×1000×2000 | 389 | 413 | 457 | 0.94× | 0.85× |
-| 384×2k×2k | 235 | 237 | 280 | tie | 0.84× |
+| 4k×4095×4k | **461** | n/a | 143 | — | **3.21×** |
+| 4095×4095×4095 | **404** | n/a | 151 | — | **2.68×** |
+| 2k×2047×2k | **271** | n/a | 135 | — | **2.01×** |
+| 1k×1023×1k | **108** | n/a | 65 | — | **1.66×** |
+| 16k×8k×128 | **320** | 319 | 300 | tie | **1.07×** |
+| 8k×8k×128 | **301** | 297 | 283 | tie | **1.06×** |
+| 16k×8k×4k | **733** | 718 | 704 | **1.02×** | **1.04×** |
+| 8k×8k×16k | **721** | 711 | 697 | tie | **1.02×** |
+| 4k×8k×128 | **266** | 258 | 260 | **1.03×** | **1.02×** |
+| 8k×8k×8k | **687** | 681 | 672 | tie | **1.02×** |
+| 16k×4k×8k | **686** | 681 | 672 | tie | **1.02×** |
+| 8k×8k×4k | **732** | 721 | 720 | tie | **1.02×** |
+| 16k×16k×16k | **656** | 654 | 659 | tie | **1.02×** |
+| 8k×8k×2k | **746** | 735 | 740 | tie | **1.01×** |
+| 32k×8k×2k | **720** | 693 | 716 | **1.04×** | **1.01×** |
+| 4k×8k×512 | **578** | 628 | 577 | 0.92× | **1.00×** |
+| 4k×8k×256 | 436 | 441 | 438 | tie | 1.00× |
+| 4k×4k×1k | 644 | 622 | 647 | **1.03×** | 0.99× |
+| 4k×8k×8k | 690 | 686 | 694 | tie | 0.99× |
+| 8k×4k×8k | 712 | 709 | 716 | tie | 0.99× |
+| 4k×4k×8k | 718 | 717 | 723 | tie | 0.99× |
+| 4k×8k×1k | 690 | 659 | 697 | **1.05×** | 0.99× |
+| 4k×4k×4k | 767 | 768 | 781 | tie | 0.98× |
+| 8k×1k×8k | 781 | 789 | 797 | tie | 0.98× |
+| 8k×8k×1k | 712 | 674 | 727 | **1.06×** | 0.98× |
+| 2k×2k×2k | 589 | 593 | 607 | tie | 0.97× |
+| 1k×1k×1k | 214 | 206 | 220 | **1.04×** | 0.97× |
+| 4k×512×4k | 514 | 533 | 530 | 0.97× | 0.97× |
+| 2k×2k×512 | 298 | 319 | 326 | 0.94× | 0.91× |
+| 3000×1000×2000 | 391 | 412 | 458 | 0.95× | 0.85× |
+| 384×2k×2k | 235 | 237 | 279 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 18 of 27 supported.**
 
 ### Methodology (read before the numbers)
 
@@ -292,7 +292,10 @@ Compile-time, via `-D`:
 | `CFG_HOIST_DESC` | 1 | build the wgmma descriptor once per k-tile and reach each k16 issue with an immediate add, instead of rebuilding the 64-bit field per issue. Cuts the BN=256 wgmma region from 214 to 159 instructions; +1.6% at 1024³, +1.7% at 4k×8k×256, ~0 on large shapes. `0` restores the per-issue rebuild |
 | `CFG_STAGES` | 4 | pipeline depth for the BN=256 tile (BN=128 uses 6) |
 | `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤128`, `tiles_m≤16`, `K≤512` and `N≤512`. The `K≤128` / `tiles_m≤16` arms are worth **+6–20%** on five shapes (setup-dependent — see §16); the older arms were fitted under a measurement setup since shown to be distorted and have not been re-derived |
-| `CFG_CLUSTER_M` | 2 | CTAs per cluster sharing a B tile; 1 disables multicast (−7.8%) |
+| `CFG_CLUSTER_M` | 2 | CTAs per cluster sharing a B tile via TMA multicast |
+| `CFG_CLUSTER_MIN_K` | 2048 | the cluster's cost is per tile, its benefit per k-tile — below this K it does not amortise |
+| `CFG_CLUSTER_MIN_TM` | 32 | …and it needs enough M-tiles for the multicast to be reused. At K=2048 the cluster is **+7.6%** on `32k×8k×2k` (tiles_m=256) and **−8.4%** on `2k×2k×2k` (tiles_m=16) |
+| `CFG_CLUSTER_NARROW_N` | 4 | override: with few N-tiles B is re-read per M-row, so the multicast pays regardless of K (`3000×1000×2000` loses 14.6pp without it) |
 | `CFG_CONSUMER_REGS` | 232 | consumer warpgroup register budget |
 | `CFG_PRODUCER_REGS` | 32 | producer warpgroup register budget |
 | `CFG_FORCE_BM`, `CFG_FORCE_BN` | *unset* | pin the tile shape, bypassing the dispatcher |

@@ -37,8 +37,8 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
 | 15 | L2 residency hints on TMA | **+1.5%** median on qualifying shapes |
-| 16 | Re-tune GROUP_M under corrected measurement | **+6–20%** on five shapes; `g* = √(SM·BN/BM)` derived |
-| — | **Final** | **parity**: 14/31 ≥ cuBLAS, 16/27 ≥ tuned CUTLASS (18 ties), 65–79% of peak, random data + cold L2 |
+| 16 | Decouple the cluster decision from GROUP_M | 18/27 ≥ CUTLASS (was 16); `g* = √(SM·BN/BM)` derived |
+| — | **Final** | **parity**: 16/31 ≥ cuBLAS, 18/27 ≥ tuned CUTLASS (16 ties), 65–79% of peak, random data + cold L2 |
 
 ---
 
@@ -999,41 +999,41 @@ runs them in place.
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **467** | n/a | 143 | — | **3.26×** |
-| 4095×4095×4095 | **408** | n/a | 150 | — | **2.71×** |
-| 2k×2047×2k | **273** | n/a | 135 | — | **2.02×** |
-| 1k×1023×1k | **109** | n/a | 65 | — | **1.66×** |
-| 16k×8k×128 | **320** | 320 | 299 | tie | **1.07×** |
-| 8k×8k×128 | **300** | 294 | 283 | tie | **1.06×** |
-| 16k×8k×4k | **650** | 641 | 636 | tie | **1.03×** |
-| 8k×8k×16k | **713** | 718 | 704 | tie | **1.02×** |
-| 4k×8k×128 | **266** | 259 | 261 | **1.02×** | **1.02×** |
-| 16k×4k×8k | **688** | 661 | 651 | tie | **1.02×** |
-| 8k×8k×8k | **710** | 703 | 695 | tie | **1.02×** |
-| 16k×16k×16k | **660** | 676 | 659 | tie | **1.02×** |
-| 8k×8k×4k | **727** | 717 | 714 | tie | **1.02×** |
-| 32k×8k×2k | **714** | 685 | 711 | **1.04×** | **1.00×** |
-| 8k×4k×8k | 706 | 702 | 710 | tie | 0.99× |
-| 8k×8k×2k | 734 | 730 | 739 | tie | 0.99× |
-| 4k×8k×8k | 748 | 738 | 753 | tie | 0.99× |
-| 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
-| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
-| 2k×2k×2k | 593 | 592 | 607 | tie | 0.98× |
-| 4k×4k×4k | 764 | 768 | 782 | tie | 0.98× |
-| 1k×1k×1k | 214 | 202 | 219 | **1.05×** | 0.97× |
-| 4k×512×4k | 514 | 535 | 531 | 0.97× | 0.97× |
-| 4k×8k×512 | 558 | 626 | 577 | 0.89× | 0.97× |
-| 4k×8k×256 | 423 | 440 | 438 | 0.96× | 0.97× |
-| 8k×8k×1k | 692 | 675 | 726 | **1.02×** | 0.95× |
-| 4k×8k×1k | 662 | 659 | 697 | tie | 0.95× |
-| 4k×4k×1k | 613 | 621 | 646 | tie | 0.95× |
-| 2k×2k×512 | 302 | 320 | 328 | 0.94× | 0.92× |
-| 3000×1000×2000 | 389 | 413 | 457 | 0.94× | 0.85× |
-| 384×2k×2k | 235 | 237 | 280 | tie | 0.84× |
+| 4k×4095×4k | **461** | n/a | 143 | — | **3.21×** |
+| 4095×4095×4095 | **404** | n/a | 151 | — | **2.68×** |
+| 2k×2047×2k | **271** | n/a | 135 | — | **2.01×** |
+| 1k×1023×1k | **108** | n/a | 65 | — | **1.66×** |
+| 16k×8k×128 | **320** | 319 | 300 | tie | **1.07×** |
+| 8k×8k×128 | **301** | 297 | 283 | tie | **1.06×** |
+| 16k×8k×4k | **733** | 718 | 704 | **1.02×** | **1.04×** |
+| 8k×8k×16k | **721** | 711 | 697 | tie | **1.02×** |
+| 4k×8k×128 | **266** | 258 | 260 | **1.03×** | **1.02×** |
+| 8k×8k×8k | **687** | 681 | 672 | tie | **1.02×** |
+| 16k×4k×8k | **686** | 681 | 672 | tie | **1.02×** |
+| 8k×8k×4k | **732** | 721 | 720 | tie | **1.02×** |
+| 16k×16k×16k | **656** | 654 | 659 | tie | **1.02×** |
+| 8k×8k×2k | **746** | 735 | 740 | tie | **1.01×** |
+| 32k×8k×2k | **720** | 693 | 716 | **1.04×** | **1.01×** |
+| 4k×8k×512 | **578** | 628 | 577 | 0.92× | **1.00×** |
+| 4k×8k×256 | 436 | 441 | 438 | tie | 1.00× |
+| 4k×4k×1k | 644 | 622 | 647 | **1.03×** | 0.99× |
+| 4k×8k×8k | 690 | 686 | 694 | tie | 0.99× |
+| 8k×4k×8k | 712 | 709 | 716 | tie | 0.99× |
+| 4k×4k×8k | 718 | 717 | 723 | tie | 0.99× |
+| 4k×8k×1k | 690 | 659 | 697 | **1.05×** | 0.99× |
+| 4k×4k×4k | 767 | 768 | 781 | tie | 0.98× |
+| 8k×1k×8k | 781 | 789 | 797 | tie | 0.98× |
+| 8k×8k×1k | 712 | 674 | 727 | **1.06×** | 0.98× |
+| 2k×2k×2k | 589 | 593 | 607 | tie | 0.97× |
+| 1k×1k×1k | 214 | 206 | 220 | **1.04×** | 0.97× |
+| 4k×512×4k | 514 | 533 | 530 | 0.97× | 0.97× |
+| 2k×2k×512 | 298 | 319 | 326 | 0.94× | 0.91× |
+| 3000×1000×2000 | 391 | 412 | 458 | 0.95× | 0.85× |
+| 384×2k×2k | 235 | 237 | 279 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 18 of 27 supported.**
 
-The honest reading is **parity**: 18 of the 27 comparable rows are statistical ties and are
+The honest reading is **parity**: 16 of the 27 comparable rows are statistical ties and are
 labelled as such. `1024^3` (1.06x) and a handful of large shapes lead, and
 CUTLASS takes the thin-K end (`2k x2k x512` 0.86x, `4k x8k x512` 0.89x, `4k x512x4k` 0.94x)
 -- section 14 explains why. It is bit-exact against cuBLAS on every shape it runs.
@@ -1393,36 +1393,65 @@ coming from somewhere other than cache residency and the optimization is misname
 
 ---
 
-## 16. Re-tuning GROUP_M under the corrected methodology
+## 16. The cluster decision, and a correction to what GROUP_M was doing
 
-Chasing why CUTLASS beat us 0.89x on `2048x2048x512` found the cause on our side: the
-GROUP_M policy picked 4 for that shape, and 1 is 19% faster.
+**This section previously claimed that `GROUP_M=1` wins on short-K and small-grid shapes
+because rasterizing straight down N is better there. That was wrong.**
 
-The policy in section 11 was fitted with memset operand data, a hot L2 and sequential timing
--- all three since shown to distort results (sections 12-15). Re-sweeping GROUP_M under random
-data, cold L2 and interleaved timing moves the optimum for short-K and small-grid shapes:
+`GROUP_M=1` was not selecting a rasterization. It was silently switching off the 2-CTA
+cluster. The old condition read
 
-| shape | K | tiles_m | old policy | best | gain |
-|---|---|---|---|---|---|
-| 2048x2048x512 | 512 | 16 | GM=4 | **GM=1** | **+19%** |
-| 16384x8192x128 | 128 | 128 | GM=4 | **GM=1** | +8.9% |
-| 8192x8192x128 | 128 | 64 | GM=4 | **GM=1** | +7.4% |
-| 4096x8192x128 | 128 | 32 | GM=4 | **GM=1** | +7.1% |
-| 2048x2048x2048 | 2048 | 16 | GM=8 | **GM=1** | +7.0% |
-| 384x2048x2048 | 2048 | 3 | GM=2 | GM=1 | -0.7% |
+```cpp
+use_cluster = (CM > 1) && (tiles_m % CM == 0) && (group_m % CM == 0);
+```
 
-Two new arms cover it: `K <= 128 -> 1` and `tiles_m <= 16 -> 1`. Rasterizing straight down N
-wins when the k-loop is too short for L2 reuse to pay for the grouping, or when there are too
-few M-tiles for a group of 4 to mean anything (at `tiles_m = 16`, GM=4 spans a quarter of the
-grid).
+so any **odd** GROUP_M failed `group_m % CM == 0` and took the non-clustered launch, giving up
+the TMA multicast of B along with it. The "+19% from GROUP_M=1" was the cluster being
+disabled, and the two knobs were never independent.
 
-This must stay narrow: at `16384^3`, GM=1 measures **374 TFLOPS against 710** for GM=4. The
-rule is not "small GROUP_M is better".
+Isolating the cluster properly -- `GROUP_M=1` (no cluster) against `GROUP_M=2` (cluster, same
+`cgroup_m=1` grouping), then confirmed with a build-level `CFG_CLUSTER_M=1` at matched
+M-grouping:
 
-Validation, two independent runs, with the eight shapes whose GROUP_M is unchanged acting as a
-control group: the five improved shapes moved +6..19% both times, the one regression was
--0.7% both times, and all eight controls landed within +/-0.5% -- so the noise floor is ~0.4 pp
-and the gains are far outside it.
+| shape | K | tiles_m | tiles_n | cluster |
+|---|---|---|---|---|
+| 2048x2048x512 | 512 | 16 | 8 | **-16.0%** |
+| 2048x2048x2048 | 2048 | 16 | 8 | **-8.4%** |
+| 4096x8192x128 | 128 | 32 | 32 | -7.0% |
+| 8192x8192x128 | 128 | 64 | 32 | -7.0% |
+| 4096x8192x256 | 256 | 32 | 32 | -6.7% |
+| 4096x4096x4096 | 4096 | 32 | 16 | -0.6% |
+| 16384x16384x16384 | 16384 | 128 | 64 | 0.0% |
+| 8192x8192x4096 | 4096 | 64 | 32 | **+3.6%** |
+| 32768x8192x2048 | 2048 | 256 | 32 | **+7.6%** |
+| 8192x1024x8192 | 8192 | 64 | 4 | **+27.8%** |
+
+The cluster's cost is **per tile** -- cluster launch, `cluster_sync`, mbarriers that must
+collect `CONSUMERS * CLUSTER_M` arrivals. Its benefit -- halving B's L2->SM traffic by
+multicasting one B tile to both CTAs -- is **per k-tile**, and needs enough M-tiles for that
+tile to be reused. Hence the shipped rule:
+
+```
+  cluster  iff  (K >= 2048 and tiles_m >= 32)  or  tiles_n <= 4
+```
+
+K alone does not separate: at K=2048 the cluster is +7.6% on `32768x8192x2048` (tiles_m=256)
+and -8.4% on `2048x2048x2048` (tiles_m=16). The narrow-N override exists because with few
+N-tiles B is re-read once per M-row, so halving that traffic pays regardless of K --
+`3000x1000x2000` (tiles_n=4) loses **14.6pp** against CUTLASS without it.
+
+`use_cluster` no longer looks at `group_m` at all, and `cgroup_m` rounds down rather than
+rejecting odd values, so the two knobs are finally independent. The GROUP_M default also moves
+8 -> 16, matching the derivation below.
+
+Effect on the table: 16/31 at or above cuBLAS (was 14) and 18/27 at or above CUTLASS (was 16),
+with `4096x4096x1024` +4.6pp, `4096x8192x1024` +4.4pp, `8192x8192x1024` +3.5pp,
+`4096x8192x256` +2.9pp and `4096x8192x512` +2.8pp.
+
+**What this says about the previous section.** Every number in the old section 16 was measured
+correctly; the *attribution* was wrong, and it was wrong in a way no amount of re-measuring
+would have caught -- only reading the launch path did. A knob that silently changes two things
+is worse than two knobs.
 
 ### Why grouping helps at all, and why 16
 
@@ -1523,7 +1552,7 @@ Effect on the table: `2k x2k x512` 0.89x -> 0.94x, and `2k x2k x2k`, `16k x8k x1
 ## Final performance
 
 Summary: **parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the
-range** — 14 of 31 at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, with 18 of those 27 statistical
+range** — 16 of 31 at ≥1.00× cuBLAS, 18 of 27 at ≥ CUTLASS, with 16 of those 27 statistical
 ties. Those counts move ±3 between measurement sessions from identical code, so read the ties
 and the direction rather than the score. `1024³` (1.06×) is the one clear win; thin-K is the clear weakness. Measured on random
 operand data, L2 flushed per launch, interleaved, one shape per process (§12); large shapes

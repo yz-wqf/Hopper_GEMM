@@ -6,7 +6,7 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
 Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
-at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (16/27 ≥, 18 ties), up to
+at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (18/27 ≥, 16 ties), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -502,6 +502,27 @@ tile_n = in_grp / gcm;                                    // N slow
 
 ## Step 10: Per-shape GROUP_M policy — structural rules beat lookup tables
 
+**A knob that silently changes two things is worse than two knobs.** A GROUP_M policy arm
+looked like it was choosing a rasterization; it was actually switching off the 2-CTA cluster,
+because the cluster condition included `group_m % CLUSTER_M == 0` and any odd GROUP_M failed
+it. Every measurement behind that arm was correct and its *attribution* was wrong — and no
+amount of re-measuring would have caught it. Only reading the launch path did. When a tuning
+knob has a surprising effect, check what else it gates before theorising about mechanism.
+
+**Cluster on/off is a shape decision with a large dynamic range.** Isolated properly (build-
+level `CLUSTER_M=1` at matched M-grouping), the 2-CTA cluster + B multicast measured **−16% to
++28%** across shapes. Its cost is per tile (cluster launch, `cluster_sync`, mbarriers
+collecting `CONSUMERS × CLUSTER_M` arrivals); its benefit is per k-tile (halving B's L2→SM
+traffic) and needs enough M-tiles for the multicast to be reused. The rule that fit:
+
+```
+  cluster  iff  (K >= 2048 and tiles_m >= 32)  or  tiles_n <= 4
+```
+
+K alone does not separate — at K=2048 it is +7.6% at tiles_m=256 and −8.4% at tiles_m=16. The
+narrow-N override matters: with few N-tiles B is re-read once per M-row, so halving it pays
+regardless of K (one shape lost 14.6pp without it).
+
 **Re-derive every tuned constant when you fix your measurement setup.** A GROUP_M policy
 fitted under memset data + hot L2 + sequential timing was wrong once all three were corrected:
 `K<=512 -> GROUP_M=4` should have been `1` for short-K and small-grid shapes, worth **+19%** on
@@ -607,7 +628,7 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
 Result (tuning both **per shape**; random data, L2 flushed per launch, interleaved, one shape
-per process): **parity** — 16 of 27 at or above CUTLASS, 18 of those 27 statistical ties, and
+per process): **parity** — 18 of 27 at or above CUTLASS, 16 of those 27 statistical ties, and
 only `1024³` clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one. Those
 counts move ±3 between measurement sessions from identical code, so report the ties and the
 direction rather than the score.
