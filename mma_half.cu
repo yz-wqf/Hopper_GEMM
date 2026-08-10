@@ -299,15 +299,6 @@ __device__ __forceinline__ uint64_t l2_policy_evict_first() {
   asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(p));
   return p;
 }
-// The hardware default. Marking a merely-not-pinned operand `evict_first` is actively
-// harmful -- it discards reuse that was happening on its own. Measured: shapes where no
-// operand qualifies for pinning still lost 7-8% when their loads were tagged streaming.
-__device__ __forceinline__ uint64_t l2_policy_evict_normal() {
-  uint64_t p;
-  asm volatile("createpolicy.fractional.L2::evict_normal.b64 %0, 1.0;" : "=l"(p));
-  return p;
-}
-
 __device__ __forceinline__ void tma_2d_hint(void *dst, const CUtensorMap *map, int c0, int c1,
                                             uint64_t *bar, uint64_t policy) {
   asm volatile(
@@ -896,8 +887,10 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
   const int tid = threadIdx.x;
   const int wg = tid / WGS;
   const int lane_in_wg = tid % WGS;
-  // Pick which operand to keep resident from the actual operand sizes: the smaller one, if
-  // it fits under the pin budget. Everything else is tagged streaming so it cannot evict it.
+  // Pick which operand to keep resident from the actual operand sizes: the smaller one, if it
+  // passes the gate. Everything else is left *untagged* -- it emits the plain instruction with
+  // no descriptor at all. That is measured, not stylistic: tagging the streaming operand
+  // `evict_first` cost -16%, and even an explicit `evict_normal` cost -27% at 1024^3.
   const size_t l2_bytes_a = (size_t)M * (size_t)K * sizeof(half);
   const size_t l2_bytes_b = (size_t)K * (size_t)N * sizeof(half);
   const bool l2_pin_b =
@@ -905,8 +898,9 @@ __global__ __launch_bounds__(Cfg<BM_, BN_>::THREADS, 1) void gemm_kernel(
   const bool l2_pin_a = !l2_pin_b && (l2_bytes_a <= CFG_L2_PIN_MAX) &&
                         (l2_bytes_a * CFG_L2_PIN_RATIO <= l2_bytes_b);
   const bool l2_pinning = l2_pin_a || l2_pin_b;
-  const uint64_t pol_a = l2_pin_a ? l2_policy_evict_last() : l2_policy_evict_normal();
-  const uint64_t pol_b = l2_pin_b ? l2_policy_evict_last() : l2_policy_evict_normal();
+  // Only ever evict_last, and only for the pinned operand; the other branch never reads these.
+  const uint64_t pol_a = l2_pin_a ? l2_policy_evict_last() : 0ull;
+  const uint64_t pol_b = l2_pin_b ? l2_policy_evict_last() : 0ull;
   // Only push C out of the way when there is actually something to protect.
   const uint64_t pol_c = l2_pinning ? l2_policy_evict_first() : 0ull;  // 0 == use plain store
   const uint32_t rank = (CLUSTER_M_ == 1) ? 0u : cta_rank_in_cluster();

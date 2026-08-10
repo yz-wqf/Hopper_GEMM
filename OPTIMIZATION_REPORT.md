@@ -1300,6 +1300,32 @@ other three tuning mistakes in this report happened.
 already L2-resident there because the N-major rasterization sweeps it once per M-row, so there
 was never headroom. The wins came from shapes nobody was looking at.
 
+### The mechanism is not established
+
+The obvious explanation -- the small reused operand is evicted by the large streaming operand
+between reuses, and `evict_last` prevents that -- is **refuted**. Holding the pinned operand at
+4 MB and sweeping the streaming one:
+
+| streaming operand | A+B vs 50 MB L2 | delta |
+|---|---|---|
+| 8 MB | fits | -2.4% *(control: ratio 2x, gate does not fire)* |
+| 16 MB | fits | -0.3% |
+| **32 MB** | **fits, 36/50** | **+1.9%** <- peak |
+| 64 MB | 1.4x over | +0.6% |
+| 128 MB | 2.6x over | +0.5% |
+| 256 MB | 5.2x over | +0.5% |
+
+If eviction pressure were the cause the gain would grow with the streaming operand. It peaks
+where the whole working set still *fits* in L2 and shrinks as pressure rises. No story worth
+asserting fits that curve, and the control row puts this run's noise floor at 2.4 pp, against
+which most of these deltas are marginal.
+
+So: the effect is reproducible in low-noise runs (`4096x512x4096`, non-overlapping ranges over
+15 alternations, +2.1%), it is small, and **"L2 residency" is a description of the policy, not
+a demonstrated explanation of the gain**. Settling it needs `lts__t_sector_hit_rate` and
+`dram__bytes_read.sum` per build: if DRAM reads do not drop with the hints on, the win is
+coming from somewhere other than cache residency and the optimization is misnamed.
+
 ---
 
 ## Final performance

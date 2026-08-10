@@ -703,6 +703,12 @@ happening for free — shapes where *nothing* qualified for pinning still lost 6
 tag nothing as resident. And an explicit `evict_normal` policy is **not** the same as no
 policy: carrying the descriptor operand at all has a cost.
 
+**The mechanism is unestablished — treat the name with suspicion.** The obvious story (the
+stream evicts the small operand between reuses) is refuted: holding the pinned operand at 4 MB
+and sweeping the streaming one, the gain *peaks* where the whole working set still fits in L2
+(36/50 MB, +1.9%) and *shrinks* as pressure rises (+0.5% at 5x over). Confirm with
+`lts__t_sector_hit_rate` and `dram__bytes_read.sum` before calling it a residency effect.
+
 **Check whether the operand is already resident before trying to pin it.** The shape that
 motivated this work (`32768×8192×2048`, B = 32 MB in a 50 MB L2) gained −0.2%, because the
 N-major rasterization already sweeps B once per M-row and keeps it cached. The wins came from
