@@ -1822,6 +1822,84 @@ modification of this kernel; it is **a second kernel at half the tile width**, a
 tile is what earns our wins elsewhere (§10). That is a rewrite with a known regression risk on
 the shapes we currently hold, which is why it stops here.
 
+*A cost model for when it pays.* Two per-tile constants, both for one `128x128` output tile:
+`W` = tensor-core time for the tile's whole k-loop (`K/8` wgmma; per `BK=64` k-tile that is
+`2*128*128*64` = 2.10 MFLOP, ~1024 cycles at 2048 dense fp16 FLOP/cycle/SM); `P` = epilogue
+time for one warpgroup draining the *whole* tile (16384 fp32 -> fp16 -> smem via STSM ->
+global via TMA, 32 KB out). The critical asymmetry:
+
+- **Tensor-core time does not halve across warpgroups.** An SM's 4 tensor cores are shared and
+  `wgmma.m64nNk16` engages all of them, so a tile's mainloop costs `W` whether one or two
+  warpgroups issue it.
+- **Epilogue time does halve.** It is LSU/TMA work, so splitting the accumulators two ways
+  genuinely halves the wall time -- hence `P/2` for cooperative.
+
+| | mainloop | epilogue | per tile |
+|---|---|---|---|
+| cooperative | `W` (TC busy) | `P/2` (**TC idle**) | `W + P/2` |
+| pingpong | `W` (TC busy) | `P`, hidden under the other WG's mainloop | `max(W, P)` |
+
+Cooperative's loss is the `P/2` window with the tensor cores idle; that bubble is what pingpong
+fills. Gain = `(W + P/2) / max(W, P)`, i.e. **`1 + P/(2W)`** while `P < W`, saturating and then
+decaying once `P > W` and the tensor cores start starving. Fitting the single constant `P` to
+the measured curve gives `P` ~ 4 k-tiles (~4096 cycles ~ 2.3 us); independently, 32 KB of
+stores at ~3 TB/s over 132 SMs is ~1.5 us, so the epilogue is plausibly write-bandwidth-bound
+and the fitted value is the right order:
+
+| k-tiles | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| predicted `1 + P/(2W)` | 1.250 | 1.125 | 1.063 | 1.031 |
+| measured | 1.241 | 1.153 | 1.062 | 1.036 |
+
+Good across an 8x range in K with one free parameter. It breaks at 2 and 4 k-tiles (predicts
+1.0x and 1.5x, measures 1.138x and 1.248x) -- off in *opposite* directions, so not one missing
+term; fill/drain and wave quantization are the suspects, but that is untested and recorded here
+as unexplained rather than fitted away.
+
+*The criterion is K alone.* The epilogue is paid **once per output tile**, and tile count is
+`(M/128)*(N/128)` -- independent of K -- while mainloop work per tile scales with K. Further,
+`P` ~ tile area and `W` ~ tile area * K, so **the tile area cancels**: `P/W ~ 1/K` for any tile
+shape. "Pingpong wins at small K" is therefore exact, not a tile-specific heuristic. Past
+`K ~ 2500` the epilogue is under 5% of tile time and no schedule can profitably chase it, which
+is exactly where CUTLASS's own heuristic drops pingpong for cooperative. Corollary: **split-K
+inverts this** -- splitting into `S` chunks multiplies the epilogue count by `S` and adds a
+reduction, so it buys occupancy for the grid-starved small shapes in precisely the currency
+that is most expensive at low K (see *Known limitations*).
+
+*Why our cooperative pays `W + P/2` and not `max(W, P/2)`.* Not because the two consumers are
+coupled by shared barriers -- that is a consequence, not the cause. They are the top and bottom
+halves of the **same tile** (`WG_M = BM/CONSUMERS`, `a_base += cwg*WG_M*BK*2`), so they share a
+work item, a k-position and a `bar_full` stage set, and always occupy the same phase; separate
+barriers alone would buy nothing. The real blocker is a register WAR hazard across *tiles*
+within one warpgroup -- there is a single accumulator array:
+
+```c
+float d[C_::NREG];
+for (int w = my_cluster; w < total_ctiles; w += num_clusters) {
+  for (i < NREG) d[i] = 0.0f;   // tile i+1 must overwrite d ...
+  ...k-loop: wgmma into d...
+  store_c_tile_tma(d, ...);     // ... while tile i's epilogue still reads it
+}
+```
+
+Tile `i+1`'s first wgmma targets the registers tile `i`'s epilogue is draining. (The *producer*
+already exploits the gap: `release_stage` is called before the epilogue so the next tile's TMA
+loads run underneath it. Only the wgmma cannot.) Reaching `max(W, P/2)` needs double-buffered
+accumulators, `2*NREG` -- 256/thread at `128x256`, the same wall. Seen this way, **pingpong is
+a way to buy that overlap using the other warpgroup's registers as the second accumulator
+buffer**, at identical register cost and without intra-warpgroup software pipelining.
+
+*An untested variant, recorded so it is not re-derived from scratch.* Since
+`max(W, P/2) < max(W, P)`, a *pipelined* cooperative should in principle beat pingpong -- same
+bubble hidden, epilogue still split two ways. One form needs no extra registers at all: keep
+both consumers on halves of the same tile but **skew them in the k-loop**, so WG0 reaches its
+epilogue while WG1 is still in its mainloop tail, then WG0 starts tile `i+1` while WG1 drains
+tile `i`. The cost moves from registers to smem: both consumers read the *same* B stage, so
+skewing keeps every B stage resident roughly twice as long, i.e. a deeper pipeline, against
+192 KB + 32 KB already committed of a 228 KB budget. Not measured -- a hypothesis with an
+identified cost, not a recommendation. It does not change the decision above, since at
+`128x256` the register wall blocks the pingpong form regardless.
+
 *Correction worth recording.* An earlier reading of this had pingpong trading MMA concurrency
 for epilogue hiding, and therefore winning only in a middle K band and losing at short K. The
 table above refutes it: the margin is *largest* at the shortest K. That earlier conclusion came

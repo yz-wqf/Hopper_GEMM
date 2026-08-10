@@ -732,6 +732,37 @@ back-to-back already saturates the tensor core, so serializing the mainloops giv
 throughput. If a framework exposes the axis as a config flag, the isolating experiment is
 usually one line; run it before writing down a mechanism.
 
+**A per-tile cost model for consumer scheduling, and the one asymmetry it turns on.** Take `W` =
+tensor-core time for one output tile's whole k-loop, `P` = epilogue time for one warpgroup
+draining that tile alone. The asymmetry that makes scheduling matter at all: **tensor-core time
+does not halve across warpgroups** (the SM's tensor cores are shared and `wgmma` engages all of
+them), but **epilogue time does** (LSU/TMA work, genuinely parallel). So cooperative costs
+`W + P/2` per tile with the tensor cores *idle* during the `P/2`, and pingpong costs
+`max(W, P)` by hiding one warpgroup's epilogue under the other's mainloop. Gain =
+`1 + P/(2W)` while `P < W`, saturating and decaying once `P > W` (tensor cores start starving).
+Fitting only `P` reproduced a measured curve to ~1% across an 8× range in K. Note `P ≥ W` is
+where the benefit *saturates*, not where it begins — a common misreading.
+
+**The criterion reduces to K alone, because tile area cancels.** The epilogue is paid once per
+output tile, and tile count is `(M/Mt)·(N/Nt)` — independent of K — while mainloop work per
+tile scales with K. Since `P ∝ tile area` and `W ∝ tile area × K`, `P/W ∝ 1/K` *for any tile
+shape*. So "epilogue-hiding schedules win at small K" is exact rather than a tile-specific
+heuristic, and past `K ≈ 2500` (here, epilogue < 5% of tile time) no schedule can profitably
+chase it. **Corollary for split-K:** splitting K into `S` chunks multiplies the epilogue count
+by `S` and adds a reduction — it buys occupancy in exactly the currency that is most expensive
+at the low K where you were tempted to use it.
+
+**When a phase won't overlap, find the resource hazard before blaming the synchronization.** A
+natural reading of "why doesn't cooperative reach `max(W, P/2)`?" is that the consumers are
+coupled by shared barriers. That was a symptom. The consumers were halves of the *same* tile,
+so they necessarily occupied the same phase; separate barriers would have bought nothing. The
+real blocker was a register WAR hazard *across tiles within one warpgroup* — a single
+accumulator array, so tile `i+1`'s first `wgmma` targets registers tile `i`'s epilogue is still
+draining. Seen that way, pingpong is just **a way to buy the overlap using the other
+warpgroup's registers as the second accumulator buffer**, at identical register cost to
+double-buffering and without intra-warpgroup software pipelining. Ask what *resource* the two
+phases contend for; the barrier is usually downstream of it.
+
 **Accumulator capacity is what decides whether you can copy a schedule.** Accumulators are
 per-thread registers: a warpgroup owning an `M×N` tile needs `M·N/128` fp32 per thread against
 a 232-register `setmaxnreg` cap. Pingpong doubles the tile per warpgroup, so it is free at
