@@ -6,7 +6,7 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
 Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
-at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (16/27 ≥, 13 of those ties; one clear win at 1024³), up to
+at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (16/27 ≥, 14 ties; one clear win at 1024³, 1.08×), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -545,17 +545,19 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 ## Step 11: Cross-check against CUTLASS
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
-Result (after tuning both **per shape**, on random data, interleaved, one shape per process):
-**parity** — 16 of 27 at or above CUTLASS, but 13 of those 27 are statistical ties, and only
-`1024³` (1.13×) clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one.
+Result (tuning both **per shape**; random data, L2 flushed per launch, interleaved, one shape
+per process): **parity** — 16 of 27 at or above CUTLASS, 14 of those 27 statistical ties, and
+only `1024³` (1.08×) clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one.
 
-**Three measurement choices dominated every optimization in the project.** Operand data is
+**Four measurement choices dominated every optimization in the project.** Operand data is
 worth up to 19% (all-zero 906 TFLOPS vs full-entropy random 761 on identical code — zero
 operands draw less tensor-core power so clocks boost); sequential A-then-B timing does not
 cancel clock drift (1.10× sequential vs 1.01× interleaved on the same pair); and sweeping
 many shapes in one process throttles the GPU into a systematic error that *three repeats
-agreed on* (1.11× in-sweep vs 1.01× in a fresh process). Get all three right before believing
-any margin — each one individually was larger than the kernel work in this skill.
+agreed on* (1.11× in-sweep vs 1.01× in a fresh process); and any working set under the 50 MB
+L2 is measured from cache unless you flush (1.13× hot vs 1.08× cold at 1024³, while
+2048×2048×512 went 0.91× → 0.86×). Get all four right before believing any margin — each was
+individually larger than the kernel work in this skill.
 
 **Give it the same tuning freedom your dispatcher has, or your score is fiction.** A kernel
 that picks from a three-rung tile ladder at runtime, compared against CUTLASS pinned to two

@@ -33,10 +33,10 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 9 | Epilogue v3: TMA store | **+6.7%** at small K |
 | 10 | Tile dispatch (template on `BM`,`BN`) | **1024³: 0.69× → 1.04×** |
 | 11 | Per-shape `GROUP_M` policy | **+2…8%** on 6 shapes |
-| 12 | Cross-check vs per-shape-tuned CUTLASS 4.7 | **parity**: 16/27 ≥, 13 of 27 are ties; only `1024³` clearly ahead |
+| 12 | Cross-check vs per-shape-tuned CUTLASS 4.7 | **parity**: 16/27 ≥, 14 ties; only `1024³` (1.08×) clearly ahead |
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
-| — | **Final** | **parity**: 18/31 ≥ cuBLAS, 16/27 ≥ tuned CUTLASS (13 ties), 65–75% of peak on random data |
+| — | **Final** | **parity**: 16/31 ≥ cuBLAS, 16/27 ≥ tuned CUTLASS (14 ties), 65–78% of peak, random data + cold L2 |
 
 ---
 
@@ -948,44 +948,43 @@ runs them in place.
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **476** | n/a | 145 | — | **3.29×** |
-| 4095×4095×4095 | **416** | n/a | 153 | — | **2.72×** |
-| 2k×2047×2k | **299** | n/a | 144 | — | **2.08×** |
-| 1k×1023×1k | **135** | n/a | 69 | — | **1.96×** |
-| 1k×1k×1k | **321** | 284 | 302 | **1.13×** | **1.06×** |
-| 8k×8k×4k | **701** | 677 | 666 | **1.04×** | **1.05×** |
-| 4k×8k×128 | **282** | 272 | 268 | **1.04×** | **1.05×** |
-| 8k×8k×128 | **298** | 307 | 287 | 0.97× | **1.04×** |
-| 16k×4k×8k | **703** | 692 | 683 | tie | **1.03×** |
-| 16k×8k×128 | **311** | 322 | 302 | 0.97× | **1.03×** |
-| 4k×4k×8k | **680** | 655 | 660 | **1.04×** | **1.03×** |
-| 16k×8k×4k | **683** | 669 | 666 | **1.02×** | **1.02×** |
-| 8k×8k×8k | **704** | 693 | 688 | tie | **1.02×** |
-| 8k×8k×2k | **662** | 642 | 648 | **1.03×** | **1.02×** |
-| 4k×8k×256 | **465** | 457 | 460 | tie | **1.01×** |
-| 16k×16k×16k | **675** | 675 | 668 | tie | **1.01×** |
-| 384×2k×2k | **346** | 333 | 343 | **1.04×** | **1.01×** |
-| 32k×8k×2k | **667** | 642 | 662 | **1.04×** | **1.01×** |
-| 8k×4k×8k | 695 | 697 | 696 | tie | 1.00× |
-| 4k×8k×512 | 576 | 615 | 580 | 0.94× | 0.99× |
-| 8k×8k×16k | 671 | 677 | 677 | tie | 0.99× |
-| 4k×8k×8k | 683 | 687 | 691 | tie | 0.99× |
-| 4k×4k×1k | 647 | 637 | 658 | tie | 0.98× |
-| 4k×4k×4k | 731 | 733 | 751 | tie | 0.97× |
-| 8k×8k×1k | 610 | 579 | 626 | **1.05×** | 0.97× |
-| 8k×1k×8k | 742 | 741 | 764 | tie | 0.97× |
-| 4k×8k×1k | 654 | 650 | 681 | tie | 0.96× |
-| 2k×2k×2k | 639 | 664 | 682 | 0.96× | 0.94× |
-| 3000×1000×2000 | 448 | 454 | 486 | tie | 0.92× |
-| 4k×512×4k | 569 | 638 | 648 | 0.89× | 0.88× |
-| 2k×2k×512 | 354 | 387 | 416 | 0.91× | 0.85× |
+| 4k×4095×4k | **469** | n/a | 144 | — | **3.26×** |
+| 4095×4095×4095 | **410** | n/a | 151 | — | **2.72×** |
+| 2k×2047×2k | **270** | n/a | 135 | — | **2.00×** |
+| 1k×1023×1k | **109** | n/a | 65 | — | **1.68×** |
+| 8k×8k×128 | **292** | 301 | 282 | 0.97× | **1.04×** |
+| 16k×8k×4k | **653** | 640 | 636 | **1.02×** | **1.03×** |
+| 8k×8k×16k | **713** | 710 | 697 | tie | **1.02×** |
+| 8k×8k×8k | **666** | 661 | 651 | tie | **1.02×** |
+| 16k×4k×8k | **664** | 658 | 650 | tie | **1.02×** |
+| 8k×8k×4k | **700** | 689 | 686 | tie | **1.02×** |
+| 8k×8k×2k | **696** | 679 | 685 | **1.02×** | **1.02×** |
+| 16k×8k×128 | **303** | 319 | 299 | 0.95× | **1.01×** |
+| 4k×8k×128 | **263** | 260 | 260 | tie | **1.01×** |
+| 16k×16k×16k | **666** | 668 | 659 | tie | **1.01×** |
+| 32k×8k×2k | **702** | 676 | 698 | **1.04×** | **1.01×** |
+| 1k×1k×1k | **221** | 205 | 221 | **1.08×** | **1.00×** |
+| 4k×8k×8k | 715 | 710 | 718 | tie | 1.00× |
+| 4k×4k×8k | 742 | 737 | 745 | tie | 1.00× |
+| 8k×4k×8k | 683 | 678 | 686 | tie | 1.00× |
+| 4k×4k×4k | 767 | 766 | 779 | tie | 0.98× |
+| 8k×1k×8k | 779 | 787 | 795 | tie | 0.98× |
+| 4k×512×4k | 505 | 536 | 522 | 0.94× | 0.97× |
+| 4k×8k×512 | 559 | 625 | 578 | 0.89× | 0.97× |
+| 4k×4k×1k | 624 | 621 | 646 | tie | 0.97× |
+| 4k×8k×256 | 426 | 444 | 442 | 0.96× | 0.96× |
+| 4k×8k×1k | 670 | 660 | 698 | tie | 0.96× |
+| 8k×8k×1k | 696 | 673 | 725 | **1.03×** | 0.96× |
+| 2k×2k×2k | 564 | 591 | 606 | 0.96× | 0.93× |
+| 3000×1000×2000 | 402 | 414 | 459 | 0.97× | 0.88× |
+| 384×2k×2k | 237 | 240 | 274 | tie | 0.87× |
+| 2k×2k×512 | 281 | 327 | 328 | 0.86× | 0.86× |
 
-**31 shapes — ours ≥ cuBLAS on 18; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 16 of 27 supported.**
 
-The honest reading is **parity**: 13 of the 27 comparable rows are statistical ties and are
-labelled as such. **`1024^3` (1.13x, range 1.13-1.13 over three isolated runs) is the only
-clear win**; `8192x8192x1024` reads 1.05x here and 1.01x in a dedicated probe, i.e. marginal.
-CUTLASS takes the thin-K end (`4k x512x4k` 0.89x, `2k x2k x512` 0.91x, `4k x8k x512` 0.94x)
+The honest reading is **parity**: 14 of the 27 comparable rows are statistical ties and are
+labelled as such. **`1024^3` (1.08x, range 1.07-1.09) is the only row clearly ahead**, and
+CUTLASS takes the thin-K end (`2k x2k x512` 0.86x, `4k x8k x512` 0.89x, `4k x512x4k` 0.94x)
 -- section 14 explains why. It is bit-exact against cuBLAS on every shape it runs.
 
 ### Two measurement choices that mattered more than any optimization here
@@ -1029,8 +1028,36 @@ Agreement across repeats is not evidence when the error is systematic; only chan
 measurement setup exposed it. The harness now takes a shape index and `make cutlass` drives
 one process per shape.
 
-That correction cost the last large-shape claim: with isolation, `1024^3` is the only row
-that clearly exceeds 5%, and 13 of 27 are ties.
+That correction cost the last large-shape claim: with isolation, `1024^3` was the only row
+clearly exceeding 5%.
+
+**4. Flush L2 before every timed launch.** H100's L2 is 50 MB, so any shape whose working set
+(A+B+C) fits inside it was being measured entirely from cache -- which flatters small shapes,
+and only small shapes:
+
+| shape | working set | hot L2 | cold L2 |
+|---|---|---|---|
+| 1024^3 | 6 MB | 1.13x | **1.08x** |
+| 2048x2048x512 | 12 MB | 0.91x | **0.86x** |
+| 384x2048x2048 | 11 MB | 1.04x | **0.99x** |
+| 4096x4096x4096 | 96 MB | 1.02x | 1.01x |
+| 8192x8192x8192 | 384 MB | 1.00x | 1.00x |
+
+The cutoff tracks the 50 MB L2 exactly. Cold is the conservative choice -- it models a GEMM
+called once inside a larger pipeline rather than a tight loop over resident operands -- and is
+what `nvbench` and the CUTLASS profiler offer. The harness now evicts L2 with a 150 MB
+memset before each timed launch and times a single launch per sample (batching launches
+inside one event window would leave all but the first hot, defeating the point), 25 samples
+per kernel.
+
+Absolutes drop accordingly: 1024^3 reads 221 TFLOPS cold against 323 hot. Our one surviving
+win shrank from 1.13x to 1.08x, and `2048x2048x512` got worse rather than better -- the
+correction is not uniformly against us, it is against *small* shapes in both directions.
+
+**Four corrections, one direction.** Operand data (19%), sequential timing (10%),
+single-process sweeps (10%), hot L2 (5% at small shapes). Each was individually larger than
+any kernel optimization in this report, and every one had been inflating our numbers. The
+kernel work in sections 1-11 is real; the margins claimed for it were mostly measurement.
 
 ### Giving CUTLASS the same tuning freedom
 
@@ -1226,11 +1253,11 @@ methodology is written up in the `gpu-perf-root-cause` skill.
 ## Final performance
 
 Summary: **parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the
-range** — 18 of 31 at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, with 13 of those 27 statistical
-ties. `1024³` (1.13×) is the one clear win; thin-K is the clear weakness. Measured on random
-operand data, interleaved timing, one shape per process (§12); on large shapes we run 65–75%
-of the 989.4 TFLOPS peak, best single figure 8192×1024×8192 at 742 (75.0%). The same code
-reads 864 on `0x11` — that is the data, not the kernel.
+range** — 16 of 31 at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, with 14 of those 27 statistical
+ties. `1024³` (1.08×) is the one clear win; thin-K is the clear weakness. Measured on random
+operand data, L2 flushed per launch, interleaved, one shape per process (§12); large shapes
+run 65–78% of the 989.4 TFLOPS peak, best 4096³ at 767 (77.5%). The same code reads 864 on
+`0x11` with a hot cache — that is the measurement conditions, not the kernel.
 
 **On reading these numbers.** Rows within ~1% are inside the run-to-run band; only ≥1.05×
 and ≤0.95× entries are decided. The band is wider than it looks on large shapes: the same

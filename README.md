@@ -5,12 +5,13 @@
 Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specialization +
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
-**Parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range**, with
-one clear win (`1024³`, 1.13×) and a clear weakness on thin-K (`4k×512×4k` 0.89×,
-`2k×2k×512` 0.91×). 18 of 31 shapes are at ≥1.00× cuBLAS and 16 of 27 at ≥ CUTLASS, but 13
-of those 27 are statistical ties and the table marks them as such. Measured on **random
-operand data, interleaved timing, one shape per process** — see Methodology, because those
-three choices moved the results more than any optimization in this repo. Full table below.
+**Parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range.**
+16 of 31 shapes at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, of which **14 are statistical
+ties** the table marks as such. Exactly one shape is clearly ahead — `1024³` at 1.08× — and
+thin-K is a clear weakness (`2k×2k×512` 0.86×, `4k×8k×512` 0.89×). Measured with **random
+operand data, L2 flushed before every timed launch, interleaved timing, one shape per
+process**; see Methodology, because those four choices each moved the numbers more than any
+optimization in this repo. Full table below.
 
 | document | |
 |---|---|
@@ -40,39 +41,39 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **476** | n/a | 145 | — | **3.29×** |
-| 4095×4095×4095 | **416** | n/a | 153 | — | **2.72×** |
-| 2k×2047×2k | **299** | n/a | 144 | — | **2.08×** |
-| 1k×1023×1k | **135** | n/a | 69 | — | **1.96×** |
-| 1k×1k×1k | **321** | 284 | 302 | **1.13×** | **1.06×** |
-| 8k×8k×4k | **701** | 677 | 666 | **1.04×** | **1.05×** |
-| 4k×8k×128 | **282** | 272 | 268 | **1.04×** | **1.05×** |
-| 8k×8k×128 | **298** | 307 | 287 | 0.97× | **1.04×** |
-| 16k×4k×8k | **703** | 692 | 683 | tie | **1.03×** |
-| 16k×8k×128 | **311** | 322 | 302 | 0.97× | **1.03×** |
-| 4k×4k×8k | **680** | 655 | 660 | **1.04×** | **1.03×** |
-| 16k×8k×4k | **683** | 669 | 666 | **1.02×** | **1.02×** |
-| 8k×8k×8k | **704** | 693 | 688 | tie | **1.02×** |
-| 8k×8k×2k | **662** | 642 | 648 | **1.03×** | **1.02×** |
-| 4k×8k×256 | **465** | 457 | 460 | tie | **1.01×** |
-| 16k×16k×16k | **675** | 675 | 668 | tie | **1.01×** |
-| 384×2k×2k | **346** | 333 | 343 | **1.04×** | **1.01×** |
-| 32k×8k×2k | **667** | 642 | 662 | **1.04×** | **1.01×** |
-| 8k×4k×8k | 695 | 697 | 696 | tie | 1.00× |
-| 4k×8k×512 | 576 | 615 | 580 | 0.94× | 0.99× |
-| 8k×8k×16k | 671 | 677 | 677 | tie | 0.99× |
-| 4k×8k×8k | 683 | 687 | 691 | tie | 0.99× |
-| 4k×4k×1k | 647 | 637 | 658 | tie | 0.98× |
-| 4k×4k×4k | 731 | 733 | 751 | tie | 0.97× |
-| 8k×8k×1k | 610 | 579 | 626 | **1.05×** | 0.97× |
-| 8k×1k×8k | 742 | 741 | 764 | tie | 0.97× |
-| 4k×8k×1k | 654 | 650 | 681 | tie | 0.96× |
-| 2k×2k×2k | 639 | 664 | 682 | 0.96× | 0.94× |
-| 3000×1000×2000 | 448 | 454 | 486 | tie | 0.92× |
-| 4k×512×4k | 569 | 638 | 648 | 0.89× | 0.88× |
-| 2k×2k×512 | 354 | 387 | 416 | 0.91× | 0.85× |
+| 4k×4095×4k | **469** | n/a | 144 | — | **3.26×** |
+| 4095×4095×4095 | **410** | n/a | 151 | — | **2.72×** |
+| 2k×2047×2k | **270** | n/a | 135 | — | **2.00×** |
+| 1k×1023×1k | **109** | n/a | 65 | — | **1.68×** |
+| 8k×8k×128 | **292** | 301 | 282 | 0.97× | **1.04×** |
+| 16k×8k×4k | **653** | 640 | 636 | **1.02×** | **1.03×** |
+| 8k×8k×16k | **713** | 710 | 697 | tie | **1.02×** |
+| 8k×8k×8k | **666** | 661 | 651 | tie | **1.02×** |
+| 16k×4k×8k | **664** | 658 | 650 | tie | **1.02×** |
+| 8k×8k×4k | **700** | 689 | 686 | tie | **1.02×** |
+| 8k×8k×2k | **696** | 679 | 685 | **1.02×** | **1.02×** |
+| 16k×8k×128 | **303** | 319 | 299 | 0.95× | **1.01×** |
+| 4k×8k×128 | **263** | 260 | 260 | tie | **1.01×** |
+| 16k×16k×16k | **666** | 668 | 659 | tie | **1.01×** |
+| 32k×8k×2k | **702** | 676 | 698 | **1.04×** | **1.01×** |
+| 1k×1k×1k | **221** | 205 | 221 | **1.08×** | **1.00×** |
+| 4k×8k×8k | 715 | 710 | 718 | tie | 1.00× |
+| 4k×4k×8k | 742 | 737 | 745 | tie | 1.00× |
+| 8k×4k×8k | 683 | 678 | 686 | tie | 1.00× |
+| 4k×4k×4k | 767 | 766 | 779 | tie | 0.98× |
+| 8k×1k×8k | 779 | 787 | 795 | tie | 0.98× |
+| 4k×512×4k | 505 | 536 | 522 | 0.94× | 0.97× |
+| 4k×8k×512 | 559 | 625 | 578 | 0.89× | 0.97× |
+| 4k×4k×1k | 624 | 621 | 646 | tie | 0.97× |
+| 4k×8k×256 | 426 | 444 | 442 | 0.96× | 0.96× |
+| 4k×8k×1k | 670 | 660 | 698 | tie | 0.96× |
+| 8k×8k×1k | 696 | 673 | 725 | **1.03×** | 0.96× |
+| 2k×2k×2k | 564 | 591 | 606 | 0.96× | 0.93× |
+| 3000×1000×2000 | 402 | 414 | 459 | 0.97× | 0.88× |
+| 384×2k×2k | 237 | 240 | 274 | tie | 0.87× |
+| 2k×2k×512 | 281 | 327 | 328 | 0.86× | 0.86× |
 
-**31 shapes — ours ≥ cuBLAS on 18; ours ≥ CUTLASS on 16 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 16; ours ≥ CUTLASS on 16 of 27 supported.**
 
 ### Methodology (read before the numbers)
 
@@ -104,17 +105,34 @@ in a full single-process run — *three repeats all agreed* — and 1.01–1.05�
 process. That is systematic, not noise, so more repeats do not fix it; isolation does.
 `make cutlass` drives one shape per process.
 
+**L2 is flushed before every timed launch.** H100's L2 is 50 MB. Any shape whose working set
+(A+B+C) fits inside it is otherwise measured entirely from cache, which flatters small shapes
+and only small shapes:
+
+| shape | working set | hot L2 | cold L2 |
+|---|---|---|---|
+| 1024³ | 6 MB | 1.13× | **1.08×** |
+| 2048×2048×512 | 12 MB | 0.91× | **0.86×** |
+| 384×2k×2k | 11 MB | 1.04× | **0.99×** |
+| 4096³ | 96 MB | 1.02× | 1.01× |
+| 8192³ | 384 MB | 1.00× | 1.00× |
+
+Shapes above ~50 MB are unaffected either way. Cold is the conservative choice and models a
+GEMM called once inside a larger pipeline rather than a tight loop over resident operands;
+`nvbench` and the CUTLASS profiler both offer it. Absolute figures drop accordingly — 1024³
+reads 221 TFLOPS cold against 323 hot.
+
 **Ties are labelled.** Where the ours/CUTLASS ratio range across runs spans 1.00, or the
 margin is under 2%, the table says `tie` rather than printing a number that implies
-precision the measurement does not have. 13 of the 27 comparable rows are ties.
+precision the measurement does not have. 14 of the 27 comparable rows are ties.
 
 Rows within ~1% of each other are inside the run-to-run band on this machine: large shapes
 drift ±50–100 TFLOPS between runs depending on clocks. Treat `0.99×`–`1.01×` as a tie and
 only the ≥1.05× and ≤0.95× entries as decided. The medians above are over 3 serial runs.
 
-Large shapes run **65–75% of the 989.4 TFLOPS** hardware peak on random data — best
-single figure is 8192×1024×8192 at 742 TFLOPS (75.0%), with 4096³ at 731 (73.9%). On `0x11`
-the same code reads 864 (87.3%); that number is not wrong, it is just easier data.
+Large shapes run **65–78% of the 989.4 TFLOPS** hardware peak on random data with L2
+flushed — best single figure is 4096³ at 767 TFLOPS (77.5%). On `0x11` with a hot cache the
+same code reads 864 (87.3%); that number is not wrong, it is measuring easier conditions.
 
 **On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
 runtime tile heuristic (that is what its offline profiler is for) — so it gets the same two-rung

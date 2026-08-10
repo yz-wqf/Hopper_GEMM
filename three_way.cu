@@ -42,7 +42,16 @@ int main(int argc,char**argv){
   // process.
   int only = (argc>1) ? atoi(argv[1]) : -1;
   cudaFree(0); cublasCreate(&H);
-  const float al=1.f,be=0.f; const int REP=5,IT=20;
+  // L2-eviction buffer. Without flushing, any shape whose working set fits the 50 MB L2 is
+  // measured entirely from cache: at 1024^3 (6 MB working set) that reported 1.12x for a
+  // pair that measures 1.04x cold, and 2048x2048x512 flipped 1.02x -> 0.98x. Shapes above
+  // ~50 MB are unaffected either way. Cold is the conservative, standard choice (nvbench and
+  // the CUTLASS profiler both offer it) and models a GEMM called once inside a larger
+  // pipeline rather than in a tight loop over resident operands.
+  int l2_bytes = 0; cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, 0);
+  const size_t FLUSH_BYTES = (size_t)l2_bytes * 3;
+  char *l2_flush = nullptr; cudaMalloc(&l2_flush, FLUSH_BYTES);
+  const float al=1.f,be=0.f; const int REP=25,IT=1;   // 25 cold samples per kernel
   std::mt19937 rng(9); std::uniform_real_distribution<float> D(-1.f,1.f);
   if(only<0||only==0) printf("%-18s %9s %9s %9s %8s %8s  %s\n","M x N x K","ours","CUTLASS","cuBLAS",
          "ours/cut","ours/cuB","cutlass correctness");
@@ -78,12 +87,17 @@ int main(int argc,char**argv){
     auto cut =[&]{ h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0); };
     auto cb  =[&]{ cublasGemmEx(H,CUBLAS_OP_N,CUBLAS_OP_N,N,M,K,&al,B,CUDA_R_16F,N,A,CUDA_R_16F,K,&be,C,CUDA_R_16F,N,CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT); };
     cudaEvent_t e0,e1; cudaEventCreate(&e0); cudaEventCreate(&e1); float t;
-    auto time_n=[&](auto fn,int warm,int reps,int iters){ std::vector<double> v;
+    // Cold-L2 sample: evict, then time ONE launch. Event overhead (~1us) applies equally to
+    // all three kernels. Timing a batch of launches inside one event window would leave all
+    // but the first running hot, which is the thing being avoided.
+    auto sample=[&](auto fn){ cudaMemsetAsync(l2_flush,0x5a,FLUSH_BYTES);
+      cudaEventRecord(e0); fn(); cudaEventRecord(e1); cudaEventSynchronize(e1);
+      cudaEventElapsedTime(&t,e0,e1); return (double)t; };
+    auto time_n=[&](auto fn,int warm,int reps,int){ std::vector<double> v;
       for(int r=0;r<warm;r++) fn(); cudaDeviceSynchronize();
-      for(int r=0;r<reps;r++){ cudaEventRecord(e0); for(int j=0;j<iters;j++) fn();
-        cudaEventRecord(e1); cudaEventSynchronize(e1); cudaEventElapsedTime(&t,e0,e1); v.push_back(t/iters);}
+      for(int r=0;r<reps;r++) v.push_back(sample(fn));
       return fl/(med(v)*1e9); };
-    auto time=[&](auto fn){ return time_n(fn,5,REP,IT); };
+    auto time=[&](auto fn){ return time_n(fn,5,REP,0); };
     // CUTLASS gets its threadblock swizzle swept per shape and keeps the best -- the
     // scheduler default is no swizzle at all, which is not a fair baseline against a
     // kernel that rasterizes for L2 (23% at 16384^3), and a fixed cap is an overfit the
@@ -124,14 +138,12 @@ int main(int argc,char**argv){
     // shapes the drift dwarfs the effect: at 8192x4096x8192 both kernels swing 785-912
     // TFLOPS run to run *together*, and sequential timing reported 1.10x for a pair that
     // measures 1.01x interleaved. Round-robin so drift hits all three equally.
-    auto one=[&](auto fn){ cudaEventRecord(e0); for(int j=0;j<IT;j++) fn();
-      cudaEventRecord(e1); cudaEventSynchronize(e1); cudaEventElapsedTime(&t,e0,e1); return (double)t/IT; };
     for(int r=0;r<5;r++){ ours(); if(cut_ok) cut(); cb(); }
     cudaDeviceSynchronize();
     std::vector<double> vo,vc,vb;
-    for(int r=0;r<REP;r++){ vo.push_back(one(ours));
-                            if(cut_ok) vc.push_back(one(cut));
-                            vb.push_back(one(cb)); }
+    for(int r=0;r<REP;r++){ vo.push_back(sample(ours));
+                            if(cut_ok) vc.push_back(sample(cut));
+                            vb.push_back(sample(cb)); }
     double o=fl/(med(vo)*1e9), c=cut_ok?fl/(med(vc)*1e9):0.0, b=fl/(med(vb)*1e9);
     char nm[48]; snprintf(nm,sizeof nm,"%lldx%lldx%lld",M,N,K);
     if(cut_ok) printf("%-18s %9.1f %9.1f %9.1f %7.2fx %7.2fx  c%d/sw%d %s\n",nm,o,c,b,o/c,o/b,best_cfg,best_sw,verdict);
