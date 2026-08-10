@@ -514,6 +514,27 @@ Two arms that did survive scrutiny, and one warning: `K <= 128 -> GROUP_M=1` and
 reuse to pay for grouping, or when there are too few M-tiles for a group of 4 to mean
 anything). Keep it narrow — at 16384³, GROUP_M=1 measures **374 TFLOPS against 710**.
 
+**The optimal rasterization group is shape-independent — derive it, don't fit it.** Writing
+out DRAM traffic under GROUP_M=g with SM concurrent CTAs (resident window `g` × `SM/g` tiles):
+
+```
+  traffic(g) = A·tiles_n·g/SM + B·tiles_m/g + C
+  g* = sqrt(SM · B · tiles_m / (A · tiles_n)) = sqrt(SM · BN / BM)     <- M, N, K cancel
+```
+
+C contributes nothing to the optimum: it is written once and its resident footprint is
+`SM·BM·BN·2`, both g-independent — even when C is 98% of all bytes moved. For BM=128:
+**16.2 at BN=256, 8.1 at BN=64**, and that matched the measured best on 5/5 shapes where
+re-fetching actually happens, including the one on a different tile.
+
+It goes silent where A+B fits in L2 — no re-fetching to optimise, so traffic stops depending
+on g. That is where empirical arms are needed, and where they are only ever local facts.
+
+**Sweeping N configurations is not the same experiment as sweeping 2.** The same GROUP_M=4
+measured 265 when rotated against GM=1 and 290–297 when rotated against 5 values, a 12% swing
+that no L2 flush removed. Report which rotation produced a number, and prefer the narrowest
+one that answers your question.
+
 **Before hard-coding any winner, search each shape 3 independent times.** Only 16 of 31
 shapes picked the same best GROUP_M all 3 times — for the other 15 the "winner" was noise.
 Of the 16 stable shapes, only 6 were worth more than 2%.

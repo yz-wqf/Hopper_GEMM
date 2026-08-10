@@ -37,7 +37,7 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
 | 15 | L2 residency hints on TMA | **+1.5%** median on qualifying shapes |
-| 16 | Re-tune GROUP_M under corrected measurement | **+6–19%** on five short-K / small-grid shapes |
+| 16 | Re-tune GROUP_M under corrected measurement | **+6–20%** on five shapes; `g* = √(SM·BN/BM)` derived |
 | — | **Final** | **parity**: 14/31 ≥ cuBLAS, 14/27 ≥ tuned CUTLASS (17 ties), 65–79% of peak, random data + cold L2 |
 
 ---
@@ -1359,6 +1359,59 @@ Validation, two independent runs, with the eight shapes whose GROUP_M is unchang
 control group: the five improved shapes moved +6..19% both times, the one regression was
 -0.7% both times, and all eight controls landed within +/-0.5% -- so the noise floor is ~0.4 pp
 and the gains are far outside it.
+
+### Why grouping helps at all, and why 16
+
+Write out the DRAM traffic for a tiled GEMM under GROUP_M=g. With SM concurrent CTAs the
+resident window is `g` M-tiles by `SM/g` N-tiles, so each A tile is re-fetched `tiles_n/(SM/g)`
+times and each B tile `tiles_m/g` times. C is written once and its resident footprint is
+`SM * BM * BN * 2` -- **both independent of g**, so C never moves the optimum, even though it
+is up to 98% of the total bytes on short-K shapes (which is itself why grouping cannot buy much
+there).
+
+```
+  traffic(g) = A·tiles_n·g/SM  +  B·tiles_m/g  +  C
+
+  dt/dg = 0  ->  g* = sqrt(SM · B · tiles_m / (A · tiles_n))
+               = sqrt(SM · (K·N)(M/BM) / ((M·K)(N/BN)))
+               = sqrt(SM · BN / BM)          <- M, N and K all cancel
+```
+
+**The optimum is shape-independent.** For BM=128: `sqrt(132 * 256/128) = 16.2` at BN=256, and
+`sqrt(132 * 64/128) = 8.1` at BN=64. That is exactly what the sweep measures wherever the
+model's premise holds -- i.e. wherever re-fetching actually happens:
+
+| shape | BN | g* | measured best |
+|---|---|---|---|
+| 8192x8192x1024 | 256 | 16.2 | **16** |
+| 4096x4096x4096 | 256 | 16.2 | **16** |
+| 8192x8192x4096 | 256 | 16.2 | **16** |
+| 32768x8192x2048 | 256 | 16.2 | **16** |
+| 384x2048x2048 | **64** | **8.1** | **8** |
+
+Five for five, including the one shape on a different tile.
+
+Where it fails is where the premise fails: if A+B fits in L2 there is no re-fetching to
+optimise, traffic stops depending on g, and the model is silent. All five GM=1 shapes have
+A+B <= 16 MB against a 50 MB L2. That is *not* a sufficient rule -- `4096x8192x256` (6 MB) and
+`4096x8192x512` (12 MB) also fit and still want GM=4 -- so the honest scope is: **the model
+predicts the optimum wherever re-fetching occurs, and says nothing where it does not.** The
+two shipped arms cover part of the region where it says nothing, empirically.
+
+### On the magnitude
+
+The `+19%` figure is setup-dependent and should be read as **+17..20%**:
+
+```
+  2-way rotation {1,4}        GM=1 317   GM=4 265   +19.9% / +19.6%
+  blocked, no interleaving    GM=1 341   GM=4 291   +17.0% / +17.9%
+  5-way {1,2,4,8,16}          GM=1 307   GM=4 297   +3.4%  / +5.9%
+```
+
+Two independent setups agree; the 5-way sweep is the outlier. GM=4 measures 265 when it
+follows GM=1 in the rotation and 290-297 when it follows GM=2, so rotating many configurations
+leaves state the 150 MB L2 flush does not clear. **Sweeping N configurations and sweeping 2 are
+not the same experiment** -- a lesson that applies to every config sweep in this report.
 
 **The uncomfortable part.** The `K<=512`, `N<=512` and default arms are still the ones fitted
 under the distorted setup. They have not been re-derived, so they are suspect in exactly the

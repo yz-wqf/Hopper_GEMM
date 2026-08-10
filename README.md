@@ -284,7 +284,7 @@ Compile-time, via `-D`:
 | `CFG_L2_PIN_RATIO` | 4 | the other operand must be at least this much larger, or there is not enough pressure for pinning to matter |
 | `CFG_HOIST_DESC` | 1 | build the wgmma descriptor once per k-tile and reach each k16 issue with an immediate add, instead of rebuilding the 64-bit field per issue. Cuts the BN=256 wgmma region from 214 to 159 instructions; +1.6% at 1024³, +1.7% at 4k×8k×256, ~0 on large shapes. `0` restores the per-issue rebuild |
 | `CFG_STAGES` | 4 | pipeline depth for the BN=256 tile (BN=128 uses 6) |
-| `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤128`, `tiles_m≤16`, `K≤512` and `N≤512`. The `K≤128` / `tiles_m≤16` arms are worth **+6–19%** on five shapes; the older arms were fitted under a measurement setup since shown to be distorted and have not been re-derived |
+| `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤128`, `tiles_m≤16`, `K≤512` and `N≤512`. The `K≤128` / `tiles_m≤16` arms are worth **+6–20%** on five shapes (setup-dependent — see §16); the older arms were fitted under a measurement setup since shown to be distorted and have not been re-derived |
 | `CFG_CLUSTER_M` | 2 | CTAs per cluster sharing a B tile; 1 disables multicast (−7.8%) |
 | `CFG_CONSUMER_REGS` | 232 | consumer warpgroup register budget |
 | `CFG_PRODUCER_REGS` | 32 | producer warpgroup register budget |
