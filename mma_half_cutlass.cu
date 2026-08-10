@@ -142,6 +142,11 @@ bool supported(int M, int N, int K) {
   return M > 0 && N > 0 && K > 0 && (K % Align == 0) && (N % Align == 0);
 }
 
+// Threadblock-swizzle cap, swept by the benchmark harness (see the comment in launch()).
+// 1 == CUTLASS's default, i.e. no swizzle.
+static int g_cutlass_swizzle = 1;
+void set_swizzle(int s) { g_cutlass_swizzle = s; }
+
 bool launch(const half *A, const half *B, half *C, int M, int N, int K, float alpha, float beta,
             cudaStream_t stream) {
   if (!supported(M, N, K)) return false;
@@ -169,6 +174,19 @@ bool launch(const half *A, const half *B, half *C, int M, int N, int K, float al
                             {{alpha, beta},
                              reinterpret_cast<const ElementC *>(C), stride_C,
                              reinterpret_cast<ElementC *>(C), stride_C}};
+
+    // Tile-scheduler rasterization. `max_swizzle_size` defaults to 1 -- *no* threadblock
+    // swizzle at all -- which is not a fair baseline against a kernel that rasterizes for
+    // L2: at 16384^3 the default costs CUTLASS 23% (691 -> 849 TFLOPS).
+    //
+    // A fixed cap is an overfit in the other direction (8 everywhere costs -38% on
+    // 384x2048x2048), and hand-writing a policy for someone else's kernel risks both
+    // hobbling and flattering it. So the harness sweeps this per shape and keeps the best,
+    // which is what CUTLASS's own offline profiler does and what "tuned" means here.
+    a.scheduler.max_swizzle_size = g_cutlass_swizzle;
+    a.scheduler.raster_order =
+        cutlass::gemm::kernel::detail::RasterOrderOptions::Heuristic;
+
     G op;
     if (op.can_implement(a) != cutlass::Status::kSuccess) return false;
     void *ws = cutlass_workspace(G::get_workspace_size(a));

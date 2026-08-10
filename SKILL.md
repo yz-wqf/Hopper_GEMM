@@ -5,8 +5,8 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
-Derived from taking an FP16 GEMM from 744 → 912 TFLOPS peak on H100 SXM5 80 GB (20/31 shapes
-at or above cuBLAS 12.9, at or above a tuned CUTLASS 4.7 on 20 of the 27 shapes it supports, up to
+Derived from taking an FP16 GEMM from 744 → 902 TFLOPS peak on H100 SXM5 80 GB (19/31 shapes
+at or above cuBLAS 12.9, at or above a tuned CUTLASS 4.7 on 17 of the 27 shapes it supports, up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -545,8 +545,14 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 ## Step 11: Cross-check against CUTLASS
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
-Result (after tuning both): **at or above CUTLASS on 20 of the 27 shapes it supports**, typical
-margin 1.01–1.22× on large shapes; CUTLASS is bit-exact against cuBLAS on every one.
+Result (after tuning both): **at or above CUTLASS on 17 of the 27 shapes it supports**, typical
+margin 1.00–1.11×; CUTLASS is bit-exact against cuBLAS on every one.
+
+**Tune its tile scheduler, not just its tile.** `max_swizzle_size` defaults to **1** — no
+threadblock swizzle at all. Against a kernel with a GROUP_M rasterization policy that is not
+a like-for-like test: at 16384³ the default costs CUTLASS 23% (691 → 849 TFLOPS), which was
+the entire content of an apparent 1.22× win. A fixed cap overfits the other way (8 everywhere
+costs −38% on 384×2048×2048). Sweep `{1,2,4,8}` per shape and keep the best.
 
 Five traps that make the comparison misleading. The first invalidated an entire round of
 measurement:

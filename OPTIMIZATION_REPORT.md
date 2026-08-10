@@ -33,10 +33,10 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 9 | Epilogue v3: TMA store | **+6.7%** at small K |
 | 10 | Tile dispatch (template on `BM`,`BN`) | **1024³: 0.69× → 1.04×** |
 | 11 | Per-shape `GROUP_M` policy | **+2…8%** on 6 shapes |
-| 12 | Cross-check vs tuned CUTLASS 4.7 | ≥ on **20 of 27**; typical **1.01–1.22×** |
+| 12 | Cross-check vs tuned CUTLASS 4.7 | ≥ on **17 of 27**; typical **1.00–1.11×** |
 | 13 | Hoist the wgmma descriptor out of the k16 loop | **+1.6%** at 1024³, ~0 large |
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
-| — | **Final** | **20/31 shapes ≥1.00× cuBLAS**, 27 at ≥0.96×, 80–92% of peak |
+| — | **Final** | **19/31 shapes ≥1.00× cuBLAS**, 80–91% of peak |
 
 ---
 
@@ -948,43 +948,84 @@ runs them in place.
 
 | M × N × K | ours | CUTLASS | cuBLAS | ours/CUTLASS | ours/cuBLAS |
 |---|---|---|---|---|---|
-| 4k×4095×4k | **500** | n/a | 145 | — | **3.45×** |
-| 4095×4095×4095 | **436** | n/a | 156 | — | **2.79×** |
-| 2k×2047×2k | **309** | n/a | 146 | — | **2.12×** |
-| 1k×1023×1k | **138** | n/a | 71 | — | **1.93×** |
-| 8k×4k×8k | **912** | 781 | 803 | **1.17×** | **1.14×** |
-| 4k×8k×8k | **911** | 773 | 803 | **1.18×** | **1.13×** |
-| 4k×4k×8k | **902** | 897 | 796 | **1.01×** | **1.13×** |
-| 8k×8k×4k | **891** | 750 | 787 | **1.19×** | **1.13×** |
-| 8k×8k×2k | **842** | 779 | 765 | **1.08×** | **1.10×** |
-| 8k×8k×8k | **862** | 814 | 788 | **1.06×** | **1.09×** |
-| 1k×1k×1k | **325** | 290 | 304 | **1.12×** | **1.07×** |
-| 8k×8k×128 | **305** | 285 | 288 | **1.07×** | **1.06×** |
-| 8k×8k×16k | **832** | 838 | 792 | 0.99× | **1.05×** |
-| 16k×16k×16k | **845** | 695 | 806 | **1.22×** | **1.05×** |
-| 4k×8k×128 | **283** | 262 | 271 | **1.08×** | **1.05×** |
-| 16k×4k×8k | **824** | 806 | 789 | **1.02×** | **1.04×** |
-| 16k×8k×128 | **314** | 301 | 303 | **1.04×** | **1.04×** |
-| 16k×8k×4k | **804** | 783 | 792 | **1.03×** | **1.02×** |
-| 4k×8k×256 | **473** | 412 | 469 | **1.15×** | **1.01×** |
-| 32k×8k×2k | **792** | 773 | 792 | **1.02×** | **1.00×** |
-| 4k×8k×512 | 610 | 574 | 610 | **1.06×** | 1.00× |
-| 4k×4k×4k | 863 | 858 | 870 | **1.01×** | 0.99× |
-| 8k×1k×8k | 886 | 888 | 900 | 1.00× | 0.98× |
-| 4k×4k×1k | 689 | 674 | 704 | **1.02×** | 0.98× |
-| 4k×8k×1k | 735 | 715 | 754 | **1.03×** | 0.97× |
-| 8k×8k×1k | 761 | 731 | 782 | **1.04×** | 0.97× |
-| 384×2k×2k | 336 | 338 | 352 | 1.00× | 0.96× |
-| 2k×2k×2k | 674 | 686 | 725 | 0.98× | 0.93× |
-| 3000×1000×2000 | 459 | 462 | 500 | 0.99× | 0.92× |
-| 2k×2k×512 | 363 | 384 | 425 | 0.95× | 0.85× |
-| 4k×512×4k | 532 | 557 | 694 | 0.95× | 0.77× |
+| 4k×4095×4k | **501** | n/a | 145 | — | **3.45×** |
+| 4095×4095×4095 | **436** | n/a | 155 | — | **2.81×** |
+| 2k×2047×2k | **311** | n/a | 147 | — | **2.11×** |
+| 1k×1023×1k | **138** | n/a | 71 | — | **1.94×** |
+| 4k×4k×8k | **902** | 836 | 784 | **1.08×** | **1.15×** |
+| 8k×8k×2k | **842** | 755 | 742 | **1.11×** | **1.13×** |
+| 1k×1k×1k | **326** | 294 | 303 | **1.11×** | **1.08×** |
+| 8k×8k×128 | **306** | 286 | 288 | **1.07×** | **1.06×** |
+| 8k×8k×16k | **838** | 838 | 793 | **1.00×** | **1.06×** |
+| 4k×8k×128 | **283** | 262 | 269 | **1.08×** | **1.05×** |
+| 16k×16k×16k | **846** | 847 | 806 | 1.00× | **1.05×** |
+| 16k×8k×128 | **312** | 306 | 303 | **1.02×** | **1.03×** |
+| 8k×8k×4k | **822** | 776 | 802 | **1.06×** | **1.02×** |
+| 8k×8k×8k | **813** | 826 | 795 | 0.98× | **1.02×** |
+| 16k×4k×8k | **812** | 826 | 793 | 0.98× | **1.02×** |
+| 16k×8k×4k | **796** | 818 | 782 | 0.97× | **1.02×** |
+| 4k×8k×256 | **472** | 410 | 468 | **1.15×** | **1.01×** |
+| 4k×8k×8k | **826** | 758 | 823 | **1.09×** | **1.00×** |
+| 8k×4k×8k | **838** | 780 | 837 | **1.07×** | **1.00×** |
+| 4k×8k×512 | 608 | 572 | 610 | **1.06×** | 1.00× |
+| 4k×4k×4k | 864 | 858 | 870 | **1.01×** | 0.99× |
+| 32k×8k×2k | 782 | 785 | 789 | 1.00× | 0.99× |
+| 8k×1k×8k | 886 | 890 | 898 | 1.00× | 0.99× |
+| 8k×8k×1k | 760 | 731 | 773 | **1.04×** | 0.98× |
+| 4k×4k×1k | 693 | 675 | 706 | **1.03×** | 0.98× |
+| 4k×8k×1k | 736 | 714 | 755 | **1.03×** | 0.97× |
+| 384×2k×2k | 337 | 339 | 352 | 0.99× | 0.96× |
+| 3000×1000×2000 | 464 | 469 | 493 | 0.99× | 0.94× |
+| 2k×2k×2k | 672 | 692 | 722 | 0.97× | 0.93× |
+| 2k×2k×512 | 363 | 387 | 429 | 0.94× | 0.85× |
+| 4k×512×4k | 559 | 557 | 693 | **1.00×** | 0.81× |
 
-**31 shapes — ours ≥ cuBLAS on 20; ours ≥ CUTLASS on 20 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 19; ours ≥ CUTLASS on 17 of 27 supported.**
 
-Typical margin on large shapes is **1.01–1.22x**. CUTLASS wins the small and thin-K end
-(`2k×2k×512`, `2k×2k×2k`, `3000×1000×2000`, `384×2k×2k`, `4k×512×4k`) -- section 14 explains
-why -- and is bit-exact against cuBLAS on every shape it runs.
+Typical margin is **1.00-1.11x** where we lead, and CUTLASS takes the small and thin-K end
+(`2k x2k x512`, `2k x2k x2k`, `3000x1000x2000`, `384x2k x2k`) -- section 14 explains why. It
+is bit-exact against cuBLAS on every shape it runs.
+
+### The tile scheduler, and a comparison that was not fair
+
+CUTLASS's persistent tile scheduler takes `max_swizzle_size`, and it **defaults to 1** -- no
+threadblock swizzle at all. Comparing that against a kernel with a GROUP_M rasterization
+policy is not a like-for-like test, and the cost is not small:
+
+| 128x256x64 c2x1 @ 16384^3 | TFLOPS |
+|---|---|
+| default (`max_swizzle_size = 1`) | 690.7 |
+| swizzle 2 | 846.9 |
+| swizzle 4 | 849.4 |
+| AlongM / AlongN, swizzle 4-8 | 849.0-849.1 |
+
+Interleaved medians, tight spreads. **That one setting was the whole of what previously read
+as a 1.22x win for us at 16384^3; the fair figure is 1.00x.** It also inflated
+`8192x8192x4096` (1.19x -> 1.06x), `8192x4096x8192` (1.17x -> 1.07x) and
+`4096x8192x8192` (1.18x -> 1.09x). Every large-shape margin was mostly this artifact. The
+small and short-K wins survive unchanged, which is consistent -- swizzle does nothing there,
+and section 12's 1024^3 analysis was about constant-load volume, not L2.
+
+Two failed attempts before the fix that stuck, both worth recording:
+
+1. **A fixed cap is an overfit in the other direction.** `max_swizzle_size = 8` everywhere
+   costs -22% on `4096x512x4096` and -38% on `384x2048x2048`, which have 2 and 3 tiles in
+   one dimension -- swizzling scrambles a grid that was already fine.
+2. **A hand-written policy for someone else's kernel is guesswork.** Gating on
+   `tiles_m >= 8 && tiles_n >= 8` still cost `4096x512x4096` 27%, because that shape takes
+   the *Small* 128x64 tile and so passes the gate on a grid that does not want swizzling.
+
+So the harness sweeps `{1,2,4,8}` per shape and measures with the winner -- what CUTLASS's
+offline profiler does, and what "tuned" should have meant from the start. The chosen value
+appears in the `sw=` column of `make cutlass`.
+
+Getting the sweep to not corrupt the measurement took two more iterations, both instructive:
+a full-weight discovery pass left the GPU hot enough to cost **cuBLAS 15%** at 4096^3
+(877 -> 763), and "fixing" that with a 400 ms settle was worse -- at 1024^3 the measurement
+is microseconds, clocks never re-boost after an idle gap, and cuBLAS read **191 instead of
+308**. The working recipe is a *cheap* discovery pass (~28 launches vs ~260) and no sleep.
+Validation is that ours and cuBLAS reproduce their previous figures to within noise while
+only the CUTLASS column moves.
 
 ---
 
@@ -1097,16 +1138,25 @@ methodology is written up in the `gpu-perf-root-cause` skill.
 
 ## Final performance
 
-Summary: **20 of 31 shapes at ≥1.00× cuBLAS 12.9**, and **≥ a tuned CUTLASS 4.7 on 20 of the
-27 shapes CUTLASS supports**. Rows within ~1% are inside the run-to-run band; only ≥1.05×
-and ≤0.95× entries are decided. Large shapes run 80–92% of the
-989.4 TFLOPS hardware peak; the best single figure is 8192×4096×8192 at 912 TFLOPS (92.2%
-of peak), with 4096³ at 863 TFLOPS (87.2%).
+Summary: **19 of 31 shapes at ≥1.00× cuBLAS 12.9**, and **≥ a tuned CUTLASS 4.7 on 17 of the
+27 shapes CUTLASS supports**, where "tuned" now includes sweeping CUTLASS's threadblock
+swizzle per shape (see §12 — leaving it at its default was worth up to 23% to us and made
+the earlier 1.22× at 16384³ an artifact). Large shapes run 80–91% of the 989.4 TFLOPS
+hardware peak; best single figure is 4096×4096×8192 at 902 TFLOPS (91.2%), with 4096³ at
+864 (87.3%).
 
-Regenerate with `make perf` (vs cuBLAS) and `make cutlass` (three-way).
+**On reading these numbers.** Rows within ~1% are inside the run-to-run band; only ≥1.05×
+and ≤0.95× entries are decided. The band is wider than it looks on large shapes: the same
+kernel and shape has read 912 and 838 TFLOPS in different sessions (8192×4096×8192), so
+treat any single large-shape figure as ±5% and prefer the ratios, which are measured
+back-to-back.
 
-Every shape below 0.95× has ≤128 output tiles against 132 SMs — the bottom of the table is
-grid starvation, not math.
+Regenerate with `make perf` (vs cuBLAS) and `make cutlass` (three-way; prints the chosen
+CUTLASS swizzle per shape in the `sw=` column).
+
+Every shape below 0.95× has ≤128 output tiles against 132 SMs, but "grid starvation" is only
+the symptom — §14 measures the actual cause as a fixed ~1.38 µs per-CTA prologue against a
+~0.59 µs per-tile advantage, break-even ~2.3 tiles/CTA.
 
 ---
 
