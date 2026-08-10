@@ -1348,6 +1348,20 @@ static bool launch_tile(const half *A, const half *B, half *C, int M, int N, int
   // Third case: a narrow N. B is re-read once per M-tile row, so with few N-tiles that
   // traffic dominates and halving it pays regardless of K. 3000x1000x2000 (tiles_n=4) loses
   // 14.6pp without the cluster; 8192x1024x8192 (tiles_n=4) gains 27.8% with it.
+  //
+  // All three clauses are proxies for one thing: does this shape hit the L2 bandwidth wall?
+  // The cluster's cost is unconditional -- CTAs give up scheduling freedom, since a cluster
+  // is GPC-co-resident and launched/retired as a unit (66 independent clusters instead of
+  // 132 CTAs). Its benefit, halving B's L2->SM traffic, only helps if that bandwidth binds.
+  // Measured demand vs measured effect separates 12/12 shapes at ~7 TB/s, which is H100's
+  // sustained L2 read bandwidth rather than a fitted constant:
+  //
+  //     3.2-7.0 TB/s  ->  -16.0% .. -0.2%      7.5-8.1 TB/s  ->  +0.9% .. +10.8%
+  //
+  // And for a fixed tile that demand is proportional to *throughput*, because L2 traffic per
+  // FLOP is shape-independent:  (BM+BN)/(BM*BN) = 0.0117 B/FLOP at 128x256, i.e. 85 FLOP/B.
+  // So "cluster above 7 TB/s" is "cluster above ~600 TFLOPS" -- which a dispatcher cannot
+  // know before running, hence the shape proxies below. See report section 16.
   const bool cluster_want = ((K >= CFG_CLUSTER_MIN_K) && (tiles_m >= CFG_CLUSTER_MIN_TM))
                             || (tiles_n <= CFG_CLUSTER_NARROW_N);
   const bool use_cluster  = cluster_ok && cluster_want;

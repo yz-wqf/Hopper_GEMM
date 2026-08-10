@@ -1440,6 +1440,63 @@ and -8.4% on `2048x2048x2048` (tiles_m=16). The narrow-N override exists because
 N-tiles B is re-read once per M-row, so halving that traffic pays regardless of K --
 `3000x1000x2000` (tiles_n=4) loses **14.6pp** against CUTLASS without it.
 
+### Why the cluster pays only on some shapes: the L2 bandwidth wall
+
+The rule above is three empirical clauses. There is one explanation underneath all of them.
+
+The cluster's **cost is unconditional**: CTAs give up scheduling freedom. A cluster must be
+co-resident within one GPC and is launched and retired as a unit, so the machine holds 66
+independent clusters instead of 132 independent CTAs. That is paid on every shape.
+
+Its **benefit is conditional**: multicast halves B's L2->SM traffic, which only helps if L2
+bandwidth is the binding constraint. Tabulating the demand -- every CTA reads its own A and B
+tile every k-tile, so `L2 bytes = CTAs * k_tiles * (BM + BN) * BK * 2` -- against the measured
+cluster effect:
+
+| L2->SM demand | shape | cluster |
+|---|---|---|
+| 3.17 TB/s | 4096x8192x128 | -7.0% |
+| 3.58 TB/s | 8192x8192x128 | -7.0% |
+| 3.69 TB/s | 2048x2048x512 | **-16.0%** |
+| 5.24 TB/s | 4096x8192x256 | -6.7% |
+| 5.94 TB/s | 8192x8192x8192 | -0.2% |
+| 6.23 TB/s | 4096x4096x4096 | -1.2% |
+| 6.46 TB/s | 4096x8192x512 | -0.4% |
+| 6.98 TB/s | 2048x2048x2048 | -8.4% |
+| **~7 TB/s -- H100 sustained L2 read bandwidth** | | |
+| 7.54 TB/s | 8192x1024x8192 | +0.9% |
+| 7.64 TB/s | 8192x8192x4096 | +2.6% |
+| 7.77 TB/s | 32768x8192x2048 | **+10.8%** |
+| 8.06 TB/s | 16384x16384x16384 | +1.1% |
+
+**Twelve of twelve.** Everything below the line is hurt or neutral; everything above it is
+helped. And the threshold is not fitted -- it is where the hardware runs out of L2 read
+bandwidth. Below it there is headroom, so halving B's traffic buys nothing and the GPC
+constraint is paid for free. Above it, L2 is the wall and multicast is the only thing that
+moves it.
+
+There is a tidy consequence. For a fixed tile the L2 traffic per FLOP is **shape-independent**:
+
+```
+  L2 bytes = M*N*K * 2 * (BM + BN) / (BM * BN)        FLOPs = 2*M*N*K
+  bytes/FLOP = (BM + BN) / (BM * BN) = 384 / 32768 = 0.0117    (85 FLOP/byte)
+```
+
+so L2 bandwidth demand is simply proportional to achieved throughput. "Above 7 TB/s" is
+exactly "above ~600 TFLOPS", and the data agrees: every shape the cluster helps runs at
+643-688 TFLOPS unclustered, every shape it hurts runs at 270-595.
+
+Which means **the cluster pays only on shapes already fast enough to saturate L2** -- circular
+for a runtime dispatcher, since throughput is not known before running. The shipped
+`(K >= 2048 and tiles_m >= 32) or tiles_n <= 4` rule is best read as a *proxy* for "will this
+shape reach the L2 wall". It also retrospectively justifies the `tiles_m >= 32` clause, which
+had no mechanism attached: small grids never reach that throughput.
+
+The same explanation covers `CLUSTER_M = 4` without needing the synchronisation arithmetic at
+all. Halving the independent clusters (66 -> 33) costs scheduling freedom on *every* shape,
+while the extra quarter of B traffic saved only helps at the wall -- and 33 clusters cannot
+keep the machine fed even there.
+
 `use_cluster` no longer looks at `group_m` at all, and `cgroup_m` rounds down rather than
 rejecting odd values, so the two knobs are finally independent. The GROUP_M default also moves
 8 -> 16, matching the derivation below.

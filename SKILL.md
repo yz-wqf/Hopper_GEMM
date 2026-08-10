@@ -523,6 +523,32 @@ K alone does not separate — at K=2048 it is +7.6% at tiles_m=256 and −8.4% a
 narrow-N override matters: with few N-tiles B is re-read once per M-row, so halving it pays
 regardless of K (one shape lost 14.6pp without it).
 
+**The cluster pays only when L2 bandwidth is the wall.** Its cost is unconditional — CTAs lose
+scheduling freedom (GPC co-residency, launched and retired as a unit, so 66 independent
+clusters instead of 132 CTAs). Its benefit — multicast halving B's L2→SM traffic — only helps
+if that bandwidth binds. Tabulating demand against the measured effect separates **12 of 12**
+shapes at ~7 TB/s, which is not a fitted threshold but H100's sustained L2 read bandwidth:
+
+```
+  3.2 / 3.6 / 3.7 / 5.2 TB/s  ->  -7.0 / -7.0 / -16.0 / -6.7 %
+  5.9 / 6.2 / 6.5 / 7.0 TB/s  ->  -0.2 / -1.2 / -0.4 /  -8.4 %
+  ----------------------------  ~7 TB/s = L2 read bandwidth
+  7.5 / 7.6 / 7.8 / 8.1 TB/s  ->  +0.9 / +2.6 / +10.8 / +1.1 %
+```
+
+And for a fixed tile the demand is proportional to *throughput*, because L2 traffic per FLOP is
+shape-independent:
+
+```
+  L2 bytes = M·N·K·2·(BM+BN)/(BM·BN),  FLOPs = 2MNK
+  bytes/FLOP = (BM+BN)/(BM·BN) = 0.0117 at 128x256   (85 FLOP/byte)
+```
+
+So "cluster when above ~7 TB/s" is "cluster when the shape already runs above ~600 TFLOPS" —
+circular for a dispatcher, which is why the shipped rule uses shape proxies (K, tiles_m,
+tiles_n) instead. Compute this number for your tile before adding cluster heuristics; it tells
+you which half of the space you are even in.
+
 **Do not turn the cluster up.** If multicast is the benefit, `CLUSTER_M=4` should save 3/4 of
 B's L2→SM traffic instead of 1/2. Measured: **−9% to −42%** across six shapes. Check where the
 synchronisation lives before assuming it amortises — if the release sits inside the k-tile loop
