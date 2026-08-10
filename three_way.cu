@@ -34,12 +34,20 @@ static void rand_fill(half *p, size_t n, unsigned seed){
 static cublasHandle_t H;
 static double med(std::vector<double> v){std::sort(v.begin(),v.end());return v[v.size()/2];}
 int main(int argc,char**argv){
+  // Optional single-shape mode. Measuring all 31 shapes in one process leaves the GPU
+  // deeply throttled by the later ones, and kernels degrade differently under throttle:
+  // 8192x8192x1024 reads 1.08-1.15x in a full run but 1.01x in a fresh process, and three
+  // repeats of the full run all agreed on the wrong answer. Systematic, not noise -- so
+  // more repeats do not help, isolation does. `make cutlass` drives this one shape per
+  // process.
+  int only = (argc>1) ? atoi(argv[1]) : -1;
   cudaFree(0); cublasCreate(&H);
   const float al=1.f,be=0.f; const int REP=5,IT=20;
   std::mt19937 rng(9); std::uniform_real_distribution<float> D(-1.f,1.f);
-  printf("%-18s %9s %9s %9s %8s %8s  %s\n","M x N x K","ours","CUTLASS","cuBLAS",
+  if(only<0||only==0) printf("%-18s %9s %9s %9s %8s %8s  %s\n","M x N x K","ours","CUTLASS","cuBLAS",
          "ours/cut","ours/cuB","cutlass correctness");
   for(int i=0;i<NSHAPES;i++){
+    if(only>=0 && i!=only) continue;
     long long M=SHAPES[i].M,N=SHAPES[i].N,K=SHAPES[i].K; double fl=2.0*M*N*K;
     bool cut_ok = h100_hgemm_cutlass::supported(M,N,K);
     half *A,*B,*C,*R;

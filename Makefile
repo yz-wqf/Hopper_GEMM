@@ -73,8 +73,10 @@ three_way: three_way.cu mma_half.cu mma_half_cutlass.cu perf_shapes.h
 	  echo "       Set it, e.g.  make cutlass CUTLASS=/path/to/cutlass"; exit 1; }
 	$(NVCC) $(CXXFLAGS) $(CUTFLAGS) -DCUTLASS_NO_SOLVE -o $@ three_way.cu mma_half_cutlass.cu $(LDLIBS)
 
+# One process per shape: measuring all 31 in one run leaves the GPU throttled by the later
+# ones, and three repeats of the single-process sweep agreed on a number that was 10% wrong.
 cutlass: three_way
-	./three_way
+	@for i in $$(seq 0 30); do ./three_way $$i; done
 
 clean:
 	rm -f $(ALL) three_way
