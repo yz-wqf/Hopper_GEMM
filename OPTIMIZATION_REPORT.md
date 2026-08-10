@@ -38,7 +38,7 @@ Hardware peak: **989.4 TFLOPS** FP16 dense tensor core.
 | 14 | Root-cause: why the remaining losses look the way they do | *(analysis, no code change)* |
 | 15 | L2 residency hints on TMA | **+1.5%** median on qualifying shapes |
 | 16 | Re-tune GROUP_M under corrected measurement | **+6–20%** on five shapes; `g* = √(SM·BN/BM)` derived |
-| — | **Final** | **parity**: 14/31 ≥ cuBLAS, 14/27 ≥ tuned CUTLASS (17 ties), 65–79% of peak, random data + cold L2 |
+| — | **Final** | **parity**: 14/31 ≥ cuBLAS, 16/27 ≥ tuned CUTLASS (18 ties), 65–79% of peak, random data + cold L2 |
 
 ---
 
@@ -1005,23 +1005,23 @@ runs them in place.
 | 1k×1023×1k | **109** | n/a | 65 | — | **1.66×** |
 | 16k×8k×128 | **320** | 320 | 299 | tie | **1.07×** |
 | 8k×8k×128 | **300** | 294 | 283 | tie | **1.06×** |
-| 16k×4k×8k | **688** | 661 | 651 | **1.04×** | **1.06×** |
-| 16k×8k×4k | **650** | 641 | 636 | tie | **1.02×** |
-| 4k×8k×128 | **266** | 259 | 261 | **1.03×** | **1.02×** |
+| 16k×8k×4k | **650** | 641 | 636 | tie | **1.03×** |
+| 8k×8k×16k | **713** | 718 | 704 | tie | **1.02×** |
+| 4k×8k×128 | **266** | 259 | 261 | **1.02×** | **1.02×** |
+| 16k×4k×8k | **688** | 661 | 651 | tie | **1.02×** |
 | 8k×8k×8k | **710** | 703 | 695 | tie | **1.02×** |
+| 16k×16k×16k | **660** | 676 | 659 | tie | **1.02×** |
 | 8k×8k×4k | **727** | 717 | 714 | tie | **1.02×** |
-| 8k×8k×16k | **713** | 718 | 704 | tie | **1.01×** |
 | 32k×8k×2k | **714** | 685 | 711 | **1.04×** | **1.00×** |
-| 16k×16k×16k | **660** | 676 | 659 | tie | **1.00×** |
 | 8k×4k×8k | 706 | 702 | 710 | tie | 0.99× |
 | 8k×8k×2k | 734 | 730 | 739 | tie | 0.99× |
 | 4k×8k×8k | 748 | 738 | 753 | tie | 0.99× |
 | 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
+| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
 | 2k×2k×2k | 593 | 592 | 607 | tie | 0.98× |
 | 4k×4k×4k | 764 | 768 | 782 | tie | 0.98× |
-| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
-| 1k×1k×1k | 214 | 202 | 219 | **1.06×** | 0.97× |
-| 4k×512×4k | 514 | 535 | 531 | 0.96× | 0.97× |
+| 1k×1k×1k | 214 | 202 | 219 | **1.05×** | 0.97× |
+| 4k×512×4k | 514 | 535 | 531 | 0.97× | 0.97× |
 | 4k×8k×512 | 558 | 626 | 577 | 0.89× | 0.97× |
 | 4k×8k×256 | 423 | 440 | 438 | 0.96× | 0.97× |
 | 8k×8k×1k | 692 | 675 | 726 | **1.02×** | 0.95× |
@@ -1031,9 +1031,9 @@ runs them in place.
 | 3000×1000×2000 | 389 | 413 | 457 | 0.94× | 0.85× |
 | 384×2k×2k | 235 | 237 | 280 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 14 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 16 of 27 supported.**
 
-The honest reading is **parity**: 17 of the 27 comparable rows are statistical ties and are
+The honest reading is **parity**: 18 of the 27 comparable rows are statistical ties and are
 labelled as such. `1024^3` (1.06x) and a handful of large shapes lead, and
 CUTLASS takes the thin-K end (`2k x2k x512` 0.86x, `4k x8k x512` 0.89x, `4k x512x4k` 0.94x)
 -- section 14 explains why. It is bit-exact against cuBLAS on every shape it runs.
@@ -1070,6 +1070,21 @@ three kernels within each repetition.
 Note the correction runs both ways: interleaving *raised* `8192x8192x1024` from 1.04x to
 1.11x. Sequential timing was not biased in our favour by design, it was simply noise being
 read as signal.
+
+**2b. Form the ratio per run, then reduce.** `median(ours) / median(theirs)` is not the same
+as `median(ours/theirs)`, and only the second respects the pairing that interleaved timing
+exists to create. Taking column medians independently lets an outlier in one column meet a
+different run's value in the other:
+
+```
+  16384x4096x8192   per-run ratios 1.042, 1.007, 1.006
+                    median(o)/median(c) = 1.042   <- one run's outlier, promoted to a "win"
+                    median(o/c)         = 1.007   <- tie
+```
+
+Two rows of the table had their verdict changed by this, including one that had been reported
+as a 1.04x win and is a tie. Cheap to get wrong, because both expressions look like "the
+median ratio".
 
 **3. One shape per process.** Interleaving was still not enough. Measuring all 31 shapes in
 one process leaves the GPU throttled by the time it reaches the later ones, and kernels
@@ -1508,7 +1523,7 @@ Effect on the table: `2k x2k x512` 0.89x -> 0.94x, and `2k x2k x2k`, `16k x8k x1
 ## Final performance
 
 Summary: **parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the
-range** — 14 of 31 at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, with 17 of those 27 statistical
+range** — 14 of 31 at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, with 18 of those 27 statistical
 ties. Those counts move ±3 between measurement sessions from identical code, so read the ties
 and the direction rather than the score. `1024³` (1.06×) is the one clear win; thin-K is the clear weakness. Measured on random
 operand data, L2 flushed per launch, interleaved, one shape per process (§12); large shapes

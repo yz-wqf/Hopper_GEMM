@@ -6,7 +6,7 @@ Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specia
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
 **Parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range.**
-14 of 31 shapes at ≥1.00× cuBLAS, 14 of 27 at ≥ CUTLASS, of which **17 are statistical
+14 of 31 shapes at ≥1.00× cuBLAS, 16 of 27 at ≥ CUTLASS, of which **18 are statistical
 ties** the table marks as such. `1024³` (1.06×) and a few large shapes lead; the remaining
 weakness is thin-K (`4k×8k×512` 0.89×, `2k×2k×512` 0.94×). Those counts move by ±3 between
 measurement sessions on this machine (a previous session gave 16/31 and 16/27 from the same
@@ -49,23 +49,23 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 | 1k×1023×1k | **109** | n/a | 65 | — | **1.66×** |
 | 16k×8k×128 | **320** | 320 | 299 | tie | **1.07×** |
 | 8k×8k×128 | **300** | 294 | 283 | tie | **1.06×** |
-| 16k×4k×8k | **688** | 661 | 651 | **1.04×** | **1.06×** |
-| 16k×8k×4k | **650** | 641 | 636 | tie | **1.02×** |
-| 4k×8k×128 | **266** | 259 | 261 | **1.03×** | **1.02×** |
+| 16k×8k×4k | **650** | 641 | 636 | tie | **1.03×** |
+| 8k×8k×16k | **713** | 718 | 704 | tie | **1.02×** |
+| 4k×8k×128 | **266** | 259 | 261 | **1.02×** | **1.02×** |
+| 16k×4k×8k | **688** | 661 | 651 | tie | **1.02×** |
 | 8k×8k×8k | **710** | 703 | 695 | tie | **1.02×** |
+| 16k×16k×16k | **660** | 676 | 659 | tie | **1.02×** |
 | 8k×8k×4k | **727** | 717 | 714 | tie | **1.02×** |
-| 8k×8k×16k | **713** | 718 | 704 | tie | **1.01×** |
 | 32k×8k×2k | **714** | 685 | 711 | **1.04×** | **1.00×** |
-| 16k×16k×16k | **660** | 676 | 659 | tie | **1.00×** |
 | 8k×4k×8k | 706 | 702 | 710 | tie | 0.99× |
 | 8k×8k×2k | 734 | 730 | 739 | tie | 0.99× |
 | 4k×8k×8k | 748 | 738 | 753 | tie | 0.99× |
 | 8k×1k×8k | 780 | 788 | 796 | tie | 0.98× |
+| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
 | 2k×2k×2k | 593 | 592 | 607 | tie | 0.98× |
 | 4k×4k×4k | 764 | 768 | 782 | tie | 0.98× |
-| 4k×4k×8k | 774 | 785 | 792 | tie | 0.98× |
-| 1k×1k×1k | 214 | 202 | 219 | **1.06×** | 0.97× |
-| 4k×512×4k | 514 | 535 | 531 | 0.96× | 0.97× |
+| 1k×1k×1k | 214 | 202 | 219 | **1.05×** | 0.97× |
+| 4k×512×4k | 514 | 535 | 531 | 0.97× | 0.97× |
 | 4k×8k×512 | 558 | 626 | 577 | 0.89× | 0.97× |
 | 4k×8k×256 | 423 | 440 | 438 | 0.96× | 0.97× |
 | 8k×8k×1k | 692 | 675 | 726 | **1.02×** | 0.95× |
@@ -75,7 +75,7 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 | 3000×1000×2000 | 389 | 413 | 457 | 0.94× | 0.85× |
 | 384×2k×2k | 235 | 237 | 280 | tie | 0.84× |
 
-**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 14 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 14; ours ≥ CUTLASS on 16 of 27 supported.**
 
 ### Methodology (read before the numbers)
 
@@ -128,6 +128,13 @@ reads 221 TFLOPS cold against 323 hot.
 different day moves individual figures by up to 12% *with no code change* — verified on shapes
 whose code path is provably identical between the two builds. Ratios measured back-to-back
 within a session are sound; absolute TFLOPS across sessions are not.
+
+**Ratios are formed per run, then reduced — never `median(ours) / median(theirs)`.** The
+three kernels are timed back-to-back inside one run precisely so their ratio is paired;
+taking medians of the two columns independently throws that pairing away and lets an outlier
+in one column meet a different run's value in the other. It changed the verdict on two rows —
+`16k×4k×8k` read 1.04× that way and is 1.007× paired (per-run: 1.042, 1.007, 1.006), and
+`16k×16k×16k` read 0.98× and is 1.005×.
 
 **Ties are labelled.** Where the ours/CUTLASS ratio range across runs spans 1.00, or the
 margin is under 2%, the table says `tie` rather than printing a number that implies

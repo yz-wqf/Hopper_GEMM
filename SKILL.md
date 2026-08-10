@@ -6,7 +6,7 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
 Derived from taking an FP16 GEMM to 730 TFLOPS on random data / 918 on memset, H100 SXM5 80 GB (20/31 shapes
-at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (14/27 ≥, 17 ties), up to
+at parity with cuBLAS 12.9 and a per-shape-tuned CUTLASS 4.7 across most of the range (16/27 ≥, 18 ties), up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -607,7 +607,7 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
 Result (tuning both **per shape**; random data, L2 flushed per launch, interleaved, one shape
-per process): **parity** — 14 of 27 at or above CUTLASS, 16 of those 27 statistical ties, and
+per process): **parity** — 16 of 27 at or above CUTLASS, 18 of those 27 statistical ties, and
 only `1024³` clearly exceeds 5%. CUTLASS is bit-exact against cuBLAS on every one. Those
 counts move ±3 between measurement sessions from identical code, so report the ties and the
 direction rather than the score.
