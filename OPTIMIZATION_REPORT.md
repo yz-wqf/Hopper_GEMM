@@ -1440,7 +1440,10 @@ and -8.4% on `2048x2048x2048` (tiles_m=16). The narrow-N override exists because
 N-tiles B is re-read once per M-row, so halving that traffic pays regardless of K --
 `3000x1000x2000` (tiles_n=4) loses **14.6pp** against CUTLASS without it.
 
-### Conclusion: CGA is a bandwidth optimisation, and only pays above the L2 wall
+### Conclusion: CGA is a bandwidth optimisation -- but the threshold does not predict
+
+**Read the held-out test above first.** The arithmetic in this subsection is exact; the
+predictive claim built on it is not.
 
 For this kernel -- 128x256x64 work quantum, `CLUSTER_M=2` -- enabling CGA is **fundamentally a
 bandwidth optimisation, not a compute one**. Its only benefit is that two CTAs share one B tile
@@ -1522,9 +1525,43 @@ cluster effect:
 | 7.77 TB/s | 32768x8192x2048 | **+10.8%** |
 | 8.06 TB/s | 16384x16384x16384 | +1.1% |
 
-**Twelve of twelve.** Everything below the line is hurt or neutral; everything above it is
-helped. And the threshold is not fitted -- it is where the hardware runs out of L2 read
-bandwidth. Below it there is headroom, so halving B's traffic buys nothing and the GPC
+**Twelve of twelve on the shapes it was built from -- and five of eleven on held-out shapes.**
+
+Tested afterwards against the nine benchmark shapes whose cluster effect had never been
+measured, plus two knowns as controls, it fails:
+
+| shape | L2 demand | predicted | measured | |
+|---|---|---|---|---|
+| 3000x1000x2000 | 3.49 T | no cluster | **+11.1%** | MISS |
+| 4096x512x4096 | 7.50 T | cluster | -4.1% | MISS |
+| 4096x4096x4096 | 7.43 T | cluster | -1.0% | MISS |
+| 32768x8192x2048 | 7.96 T | cluster | **-2.9%** | MISS |
+| 8192x8192x2048 | 8.88 T | cluster | -0.4% | MISS |
+| 4096x4096x8192 | 9.29 T | cluster | -0.3% | MISS |
+| 8192x8192x16384 | 8.28 T | cluster | +3.2% | ok |
+| 8192x4096x8192 | 8.93 T | cluster | +0.8% | ok |
+| 16384x8192x4096 | 8.72 T | cluster | +0.4% | ok |
+| 4096x8192x8192 | 8.97 T | cluster | +0.4% | ok |
+| 16384x4096x8192 | 8.76 T | cluster | +0.2% | ok |
+
+So the clean 12/12 separation above was **fitted**, not predictive, and this section previously
+presented it as a mechanism. It is not one.
+
+**And the measurements underneath it do not reproduce.** `32768x8192x2048` -- the strongest
+single data point for clustering -- measured **+10.8%** in one session and **-2.9%** in
+another, same shape, same method (`CFG_CLUSTER_M=1` vs `2`, process-alternated, 5 rounds,
+GROUP_M=16). `CM=2` read 734.3 then and 659.9 now: an 11% swing in one configuration, which is
+larger than the effect being attributed. `CLUSTER_M` is compile-time, so cluster on/off cannot
+be interleaved in-process, and process-level alternation is evidently not enough.
+
+What survives: the shipped cluster rule's *net* benefit was demonstrated in-harness with paired
+per-run ratios against CUTLASS (16/31 and 18/27, up from 14/31 and 16/27), which is a more
+reliable measurement than the cross-binary cluster deltas. The per-shape attribution -- which
+shapes the cluster helps and why -- does not currently rest on reproducible ground, and the
+bandwidth story below should be read as a plausible account rather than an established one.
+
+The original observation still holds in the weak form: the threshold coincides with H100's
+sustained L2 read bandwidth rather than being tuned to fit. Below it there is headroom, so halving B's traffic buys nothing and the GPC
 constraint is paid for free. Above it, L2 is the wall and multicast is the only thing that
 moves it.
 

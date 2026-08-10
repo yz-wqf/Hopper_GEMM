@@ -532,6 +532,13 @@ regardless of K (one shape lost 14.6pp without it).
   demand > ~7 TB/s         ->  cluster is likely to help
 ```
 
+**Caveat learned the hard way: this criterion separated 12/12 of the shapes it was built from
+and 5/11 held-out.** It is an explanation of the mechanism, not a predictor — do not ship a
+dispatch rule based on it without a held-out test. The measurements underneath it also failed
+to reproduce: one shape's cluster effect read +10.8% in one session and −2.9% in another, same
+method. `CLUSTER_M` is compile-time so cluster on/off cannot be interleaved in-process, and
+process-level alternation was not sufficient.
+
 CGA is a **bandwidth** optimisation, never a compute one: its sole benefit is two CTAs sharing
 one B tile by multicast, cutting B-side L2→SM traffic 50% but *total* L2 traffic only 1/3
 (each CTA still loads its own A). Its cost is unconditional — GPC co-residency, launch/retire
