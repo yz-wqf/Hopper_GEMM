@@ -1780,6 +1780,55 @@ block confirms they reached the same conclusion.
 **STAGES=3 to free smem for epilogue staging.** −6.6% at K=2048 and 4096³ — more than the
 epilogue win it would have funded. Chunked staging into the existing 34.9 KB instead.
 
+**Pingpong consumer scheduling.** Not implemented, and the reason is register capacity, not
+doubt about the benefit. The benefit is real and measured — see below.
+
+*What it is.* CUTLASS's `KernelTmaWarpSpecializedPingpong` gives each consumer warpgroup a
+**whole output tile** and serializes the two through an `OrderedSequenceBarrier<2,2>` — stage 0
+mainloop, stage 1 epilogue — so that while WG0 drains its epilogue, WG1 is already in its
+mainloop. CUTLASS's own source comments state the intent: *"Order two Math WG's MMA one after
+the other, helps hide Epilogue."* Ours is cooperative: `WG_M = BM/CONSUMERS = 64`, and
+`a_base += cwg*WG_M*BK*2` makes the two consumers the top and bottom **halves of the same
+tile**. Same work item, same `bar_full` stages, same k-loop — so they reach the epilogue
+together, with no wgmma in flight behind either.
+
+*The benefit, isolated.* Comparing CUTLASS against itself at a fixed `128×128×64` tile and
+`1×1×1` cluster — cooperative (c3) vs pingpong (c4), so **only the schedule differs** — at
+M=4096, N=8192, random operands, L2 flushed, paired medians of 11:
+
+| k-tiles (K) | 2 (128) | 4 (256) | 8 (512) | 16 (1024) | 32 (2048) | 64 (4096) |
+|---|---|---|---|---|---|---|
+| ping / coop | 1.138× | **1.248×** | 1.241× | 1.153× | 1.062× | 1.036× |
+
+Pingpong wins at every K, by a margin that **decays monotonically as the mainloop lengthens** —
+the signature of a fixed per-tile cost (the epilogue) being hidden and then amortized away.
+Note there is no throughput trade here: serializing the mainloops costs almost nothing, because
+`wgmma` is async and one warpgroup issuing back-to-back already saturates the tensor core, so
+the second warpgroup has no MMA throughput to give up. Epilogue hiding is near-pure gain.
+
+*Why we cannot take it.* Accumulators are per-thread registers, and pingpong doubles the tile
+each warpgroup owns:
+
+| | tile per WG | fp32 / thread | vs 232-reg cap |
+|---|---|---|---|
+| ours, cooperative 128×256 | 64×256 | `64·256/128` = **128** | fits |
+| pingpong at 128×256 | 128×256 | `128·256/128` = **256** | **over, before a single address register** |
+| pingpong at 128×128 | 128×128 | `128·128/128` = **128** | fits |
+
+A spike confirmed the arithmetic: pingpong on the 128×256 path spills `STACK:2016` bytes. The
+only tile at which pingpong fits the register file is `128×128` — which is precisely the config
+CUTLASS selects on every thin-K shape where it beats us. So "add pingpong" is not a
+modification of this kernel; it is **a second kernel at half the tile width**, and the 128×256
+tile is what earns our wins elsewhere (§10). That is a rewrite with a known regression risk on
+the shapes we currently hold, which is why it stops here.
+
+*Correction worth recording.* An earlier reading of this had pingpong trading MMA concurrency
+for epilogue hiding, and therefore winning only in a middle K band and losing at short K. The
+table above refutes it: the margin is *largest* at the shortest K. That earlier conclusion came
+from comparing their 128×128 pingpong against our 128×256 cooperative and attributing the whole
+difference to the schedule — a tile/schedule confound. The fix was to compare CUTLASS against
+itself at a fixed tile. **When attributing a win to one design axis, vary only that axis.**
+
 ---
 
 ## Correctness
@@ -1824,8 +1873,10 @@ epilogue win it would have funded. Chunked staging into the existing 34.9 KB ins
    sm_75 CUTLASS `align1` fallback -- but that is cuBLAS degrading, not us accelerating.
 4. **`beta != 0` uses the shuffle epilogue**, not TMA store -- a bulk store cannot
    read-modify-write.
-5. Timing harness uses `memset(0x11)` data. Tensor-core throughput is data-independent and
-   0x1111 is a normal fp16 (~6.2e-4, no denormal penalty); numerics are verified separately
-   (57 shapes, 0 failures, 38 bit-exact vs cuBLAS).
+5. Timing harness uses **random** operands in `[-1,1)`, L2 flushed between samples, one process
+   per shape, paired per-run ratios. An earlier version of this bullet claimed `memset(0x11)`
+   was safe because "tensor-core throughput is data-independent" — that was wrong, and the
+   correction was worth **19%**, larger than any single optimization in this report. Numerics
+   verified separately (57 shapes, 0 failures, 38 bit-exact vs cuBLAS).
 
 ---

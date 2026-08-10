@@ -719,6 +719,26 @@ in the same direction, which is what a systematically favourable setup looks lik
 shape: a schedule that had been dismissed on a single measurement at 1024³, where it is 5.5%
 worse. Third time in this project that tuning on one shape produced a wrong general rule.
 
+**When attributing a win to one design axis, vary only that axis.** Pingpong (each consumer
+warpgroup owns a whole tile, the two serialized by an `OrderedSequenceBarrier<2,2>` so one
+warpgroup's epilogue hides behind the other's mainloop) was compared as *their 128×128 pingpong
+vs our 128×256 cooperative*, and the entire difference charged to the schedule. That produced a
+confident, wrong story — a concurrency-vs-hiding trade that should win only in a middle K band
+and lose at short K. Re-running it as CUTLASS-against-itself at a **fixed** 128×128 tile
+inverted the result: pingpong wins at every K, largest at the *shortest* (1.25× at 4 k-tiles →
+1.04× at 64). That monotone decay is the fingerprint of a fixed per-tile cost being hidden and
+then amortized, and it says there is no trade at all — `wgmma` is async, one warpgroup issuing
+back-to-back already saturates the tensor core, so serializing the mainloops gives up no
+throughput. If a framework exposes the axis as a config flag, the isolating experiment is
+usually one line; run it before writing down a mechanism.
+
+**Accumulator capacity is what decides whether you can copy a schedule.** Accumulators are
+per-thread registers: a warpgroup owning an `M×N` tile needs `M·N/128` fp32 per thread against
+a 232-register `setmaxnreg` cap. Pingpong doubles the tile per warpgroup, so it is free at
+`128×128` (128 regs) and impossible at `128×256` (256 regs, measured spill `STACK:2016`).
+Check this arithmetic *before* the profiling — it converts "why is their schedule better" into
+"their schedule is only reachable at half our tile width," which is a different decision.
+
 **Tune its tile scheduler, not just its tile.** `max_swizzle_size` defaults to **1** — no
 threadblock swizzle at all. Against a kernel with a GROUP_M rasterization policy that is not
 a like-for-like test: at 16384³ the default costs CUTLASS 23% (691 → 849 TFLOPS), which was

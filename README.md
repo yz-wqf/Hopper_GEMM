@@ -162,6 +162,16 @@ Adding the middle rung and the pingpong schedule flipped **6 of the 10 shapes** 
 claimed by >5%; `128×128×64` pingpong is the best CUTLASS config on nearly every thin-K
 shape. Four >5% wins survive: `4k×8k×8k`, `1024³`, `8k×4k×8k`, `8k×8k×4k`.
 
+**We do not implement pingpong ourselves, and the reason is register capacity — not doubt
+about the benefit.** Held at a fixed `128×128` tile so that only the schedule varies, CUTLASS's
+pingpong beats its own cooperative at *every* K, by a margin largest at short K (1.25× at 4
+k-tiles, decaying to 1.04× at 64) — a fixed per-tile epilogue cost being hidden, then
+amortized. But pingpong gives each warpgroup a whole tile, so at our `128×256` it needs
+`128·256/128` = **256 fp32 accumulators per thread** against a 232-register cap; a spike spills
+2016 bytes. It fits only at `128×128`, i.e. a second kernel at half our tile width, not a
+change to this one. Full reasoning and the isolating measurement: *Rejected optimizations* in
+[OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md).
+
 **Its tile scheduler must be told to rasterize.** `max_swizzle_size` defaults to **1** —
 no threadblock swizzle at all — which is not a fair baseline against a kernel that rasterizes
 for L2. At 16384³ the default costs CUTLASS **23%** (691 → 849 TFLOPS): it alone accounted
