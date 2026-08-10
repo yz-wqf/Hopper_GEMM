@@ -523,6 +523,25 @@ K alone does not separate — at K=2048 it is +7.6% at tiles_m=256 and −8.4% a
 narrow-N override matters: with few N-tiles B is re-read once per M-row, so halving it pays
 regardless of K (one shape lost 14.6pp without it).
 
+**Decide CGA with one number: predicted L2 read demand.**
+
+```
+  demand = unclustered FLOP/s x (BM + BN) / (BM * BN)      <- M, N, K cancel
+
+  demand < ~7 TB/s (H100)  ->  do NOT cluster
+  demand > ~7 TB/s         ->  cluster is likely to help
+```
+
+CGA is a **bandwidth** optimisation, never a compute one: its sole benefit is two CTAs sharing
+one B tile by multicast, cutting B-side L2→SM traffic 50% but *total* L2 traffic only 1/3
+(each CTA still loads its own A). Its cost is unconditional — GPC co-residency, launch/retire
+as a unit, and `CLUSTER_M` remote mbarrier arrivals *per k-tile*. Below the wall you pay all of
+it for nothing.
+
+State the threshold in **TB/s**, not TFLOPS: it is tile-independent in bandwidth but not in
+throughput (~597 TFLOPS at 128x256, ~448 at 128x128; at 128x64 a cluster is impossible because
+`BLOCKS = BN/64 = 1`).
+
 **The cluster pays only when L2 bandwidth is the wall.** Its cost is unconditional — CTAs lose
 scheduling freedom (GPC co-residency, launched and retired as a unit, so 66 independent
 clusters instead of 132 CTAs). Its benefit — multicast halving B's L2→SM traffic — only helps

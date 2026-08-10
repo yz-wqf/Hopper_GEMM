@@ -210,6 +210,17 @@ struct Cfg {
   static constexpr int A_STAGE = BM_ * BK;
   static constexpr int B_STAGE = BN_ * BK;
   static constexpr int BLOCKS = BN_ / 64;                    // 64 halves = 128B = one atom
+
+  // L2 read intensity of this tile: bytes a CTA pulls from L2 per FLOP it issues. Every CTA
+  // reads BM x BK of A and BK x BN of B per k-tile, and issues 2*BM*BN*BK FLOPs, so
+  //     bytes/FLOP = (BM + BN) / (BM * BN)
+  // M, N and K cancel -- this is a property of the tile alone. It is what makes "is this
+  // kernel L2-read-bound?" answerable from throughput: L2 demand = achieved FLOP/s * this.
+  static constexpr double L2_BYTES_PER_FLOP = double(BM_ + BN_) / (double(BM_) * double(BN_));
+  //   128x256 -> 0.01171875 B/FLOP (85 FLOP/B), crossover ~597 TFLOPS
+  //   128x128 -> 0.015625        (64 FLOP/B), crossover ~448 TFLOPS
+  //   128x64  -> 0.0234375       (43 FLOP/B), but BLOCKS==1 so a cluster is impossible
+  static constexpr double CGA_CROSSOVER_FLOPS = 7.0e12 / L2_BYTES_PER_FLOP;
   static constexpr int TMA_B = (A_STAGE + B_STAGE) * (int)sizeof(half);
   static constexpr int EPI = CONSUMERS * 2 * EPI_CHUNK_ELEMS;  // 2 phases per consumer WG
   // Fill the smem budget: deeper pipelines for the cheaper tiles.
@@ -1349,19 +1360,30 @@ static bool launch_tile(const half *A, const half *B, half *C, int M, int N, int
   // traffic dominates and halving it pays regardless of K. 3000x1000x2000 (tiles_n=4) loses
   // 14.6pp without the cluster; 8192x1024x8192 (tiles_n=4) gains 27.8% with it.
   //
-  // All three clauses are proxies for one thing: does this shape hit the L2 bandwidth wall?
-  // The cluster's cost is unconditional -- CTAs give up scheduling freedom, since a cluster
-  // is GPC-co-resident and launched/retired as a unit (66 independent clusters instead of
-  // 132 CTAs). Its benefit, halving B's L2->SM traffic, only helps if that bandwidth binds.
-  // Measured demand vs measured effect separates 12/12 shapes at ~7 TB/s, which is H100's
-  // sustained L2 read bandwidth rather than a fitted constant:
+  // ALL THREE CLAUSES ARE PROXIES. The actual criterion is:
   //
+  //     enable CGA only when the UNCLUSTERED kernel is already L2-read-bandwidth-bound,
+  //     i.e. when its L2 read demand exceeds ~7 TB/s (H100 sustained L2 read bandwidth).
+  //
+  //     predicted L2 demand = unclustered FLOP/s * C_::L2_BYTES_PER_FLOP
+  //     for 128x256x64 that is  TFLOPS * 0.01171875,  so the crossover is ~597 TFLOPS
+  //
+  // Why that is the criterion: CGA here is a *bandwidth* optimisation, not a compute one.
+  // Its only benefit is that the two CTAs share one B tile by TMA multicast, cutting B-side
+  // L2->SM traffic by 50% -- but only 1/3 of total L2 traffic, because each CTA still loads
+  // its own A. Its cost is unconditional: the cluster is GPC-co-resident, launched and
+  // retired as a unit, and synchronised for multicast (release_stage issues CLUSTER_M remote
+  // arrivals *per k-tile*, and bar_empty collects CONSUMERS*CLUSTER_M of them). Below the
+  // wall you pay all of that and the saved bandwidth buys nothing.
+  //
+  // A dispatcher cannot know the unclustered throughput before running, so the shape tests
+  // below stand in for it. They separate 11 of 12 measured shapes; 4096x4096x4096 is the
+  // known false positive (6.23 TB/s, just under the wall, -1.2%).
+  //
+  // Measured demand vs measured cluster effect, 12/12 either side of ~7 TB/s:
   //     3.2-7.0 TB/s  ->  -16.0% .. -0.2%      7.5-8.1 TB/s  ->  +0.9% .. +10.8%
   //
-  // And for a fixed tile that demand is proportional to *throughput*, because L2 traffic per
-  // FLOP is shape-independent:  (BM+BN)/(BM*BN) = 0.0117 B/FLOP at 128x256, i.e. 85 FLOP/B.
-  // So "cluster above 7 TB/s" is "cluster above ~600 TFLOPS" -- which a dispatcher cannot
-  // know before running, hence the shape proxies below. See report section 16.
+  // See report section 16 for the full table and derivation.
   const bool cluster_want = ((K >= CFG_CLUSTER_MIN_K) && (tiles_m >= CFG_CLUSTER_MIN_TM))
                             || (tiles_n <= CFG_CLUSTER_NARROW_N);
   const bool use_cluster  = cluster_ok && cluster_want;

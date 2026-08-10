@@ -1440,6 +1440,59 @@ and -8.4% on `2048x2048x2048` (tiles_m=16). The narrow-N override exists because
 N-tiles B is re-read once per M-row, so halving that traffic pays regardless of K --
 `3000x1000x2000` (tiles_n=4) loses **14.6pp** against CUTLASS without it.
 
+### Conclusion: CGA is a bandwidth optimisation, and only pays above the L2 wall
+
+For this kernel -- 128x256x64 work quantum, `CLUSTER_M=2` -- enabling CGA is **fundamentally a
+bandwidth optimisation, not a compute one**. Its only benefit is that two CTAs share one B tile
+through TMA multicast, which cuts B-side L2->SM traffic by **50%** but total L2 traffic by only
+**1/3**, because each CTA still loads its own A:
+
+```
+  per CTA per k-tile:   A = BM x BK = 16 KB      B = BK x BN = 32 KB      total 48 KB
+  multicast halves B:   16 KB saved of 48  ->  33% of a CTA's L2 loads
+```
+
+The cost is **unconditional**. Clusters are GPC-co-resident, launched and retired as a unit,
+and synchronised for multicast -- `release_stage` issues `CLUSTER_M` remote mbarrier arrivals
+*per k-tile* and `bar_empty` collects `CONSUMERS * CLUSTER_M` of them.
+
+So **CGA only pays when the unclustered kernel is already L2-read-bandwidth-bound.** On H100
+that crossover is ~7 TB/s of L2 read demand. Because L2 traffic per FLOP is a property of the
+tile alone -- `(BM+BN)/(BM*BN)`, with M, N and K cancelling -- demand is proportional to
+throughput, and the crossover has a per-tile throughput form:
+
+| tile | B/FLOP | FLOP/B | crossover | cluster legal? |
+|---|---|---|---|---|
+| 128x256x64 | **0.01171875** | 85 | **~597 TFLOPS** | yes (BLOCKS=4) |
+| 128x128x64 | 0.015625 | 64 | ~448 TFLOPS | yes (BLOCKS=2) |
+| 128x64x64 | 0.0234375 | 43 | ~299 TFLOPS | **no** -- BLOCKS=1, a cluster would starve |
+
+Below the crossover CGA usually *hurts*, because the scheduling and synchronisation overhead is
+not offset by any meaningful bandwidth saving.
+
+### Recommendation
+
+```
+  predicted L2 read demand  ~=  unclustered FLOP/s  x  (BM + BN) / (BM * BN)
+
+  demand < ~7 TB/s   ->  do NOT enable CGA
+  demand > ~7 TB/s   ->  consider CGA, especially if profiling shows L2->SM as the
+                         dominant bottleneck
+```
+
+For the 128x256x64 tile that is simply `TFLOPS x 0.01171875`, so in practice: **below ~600
+TFLOPS unclustered, CGA is usually a bad idea; above it, CGA is more likely to help.**
+
+Note the threshold is tile-independent in TB/s and tile-*dependent* in TFLOPS -- 597 at
+BN=256 but 448 at BN=128 -- so state it in bandwidth, not throughput, when moving between
+tiles.
+
+In short: **CGA is bad when the kernel is not yet L2-bandwidth-bound, because you pay the
+cluster scheduling and synchronisation cost without getting enough multicast benefit back.**
+
+The constants are derived per tile in `Cfg::L2_BYTES_PER_FLOP` and `Cfg::CGA_CROSSOVER_FLOPS`
+rather than hard-coded, so they follow the tile if it changes.
+
 ### Why the cluster pays only on some shapes: the L2 bandwidth wall
 
 The rule above is three empirical clauses. There is one explanation underneath all of them.

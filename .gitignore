@@ -1,62 +1,22 @@
-# Build artifacts. Each executable shares the stem of its .cu source, so they are
-# listed explicitly rather than by pattern (a pattern would also match the sources).
-check_all
-check_fp64
-check_large
-perf_all
-perf_cmp
-perf_prof
-perf_table
-probe_kmajor
-probe_mnmajor
-probe_mnmajor_kadv
-san_large
-san_sweep
-smem_budget
-three_way
+# WHITELIST, not blacklist.
+#
+# Listing binary names here failed twice: build products share their stem with the source
+# (so `check_all` cannot be matched by a pattern that spares `check_all.cu`), and every new
+# probe invented a name nobody remembered to add. Nine binaries reached the repo that way.
+#
+# So: ignore everything, then re-admit only the file types that belong in it.
+*
+!*/
+!.gitignore
+!Makefile
+!*.cu
+!*.h
+!*.md
 
-# Intermediates and profiler output
-*.o
-*.obj
-*.cubin
-*.ptx
-*.sass
-*.nsys-rep
-*.sqlite
-*.ncu-rep
-
-# Editor / OS
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Scratch probes from the CUTLASS comparison and the perf root-cause investigation
-# (OPTIMIZATION_REPORT.md sections 12-14). Throwaway experiments, both binaries and
-# sources -- unlike the probe_*/san_*/perf_* files, these are not part of the suite.
-*_tmp
+# ...then re-exclude the throwaway probe sources, which are also *.cu. These are the
+# one-off experiments from the investigations, not part of the test suite.
 *_tmp.cu
-bench_u_*
-bench_w_*
-sass_*
-tw_*
-fill_s*
-one_BASE
-one_HOIST
-check_BASE
-check_HOIST
-check_def
-check_off
 
-# Shadowed third-party headers used for intervention experiments; the real checkout
-# is pointed at by $(CUTLASS) and is never modified.
-l2b_*
-l2f_*
-l2g_*
-l2h_*
-l2i_*
-check_l2
-check_nol2
-check_def
-
+# Shadowed third-party headers used for intervention experiments (report section 12).
+# The real CUTLASS checkout at $(CUTLASS) is never modified.
 cutlass_patch/

@@ -293,7 +293,7 @@ Compile-time, via `-D`:
 | `CFG_STAGES` | 4 | pipeline depth for the BN=256 tile (BN=128 uses 6) |
 | `CFG_GROUP_M` | 8 | fallback L2 rasterization group height. The runtime policy overrides it for narrow tiles, `K≤128`, `tiles_m≤16`, `K≤512` and `N≤512`. The `K≤128` / `tiles_m≤16` arms are worth **+6–20%** on five shapes (setup-dependent — see §16); the older arms were fitted under a measurement setup since shown to be distorted and have not been re-derived |
 | `CFG_CLUSTER_M` | 2 | CTAs per cluster sharing a B tile via TMA multicast |
-| `CFG_CLUSTER_MIN_K` | 2048 | the cluster's cost is per tile, its benefit per k-tile — below this K it does not amortise |
+| `CFG_CLUSTER_MIN_K` | 2048 | proxy for "is this shape L2-read-bandwidth-bound?" — CGA is a bandwidth optimisation whose cost is unconditional, so it only pays above ~7 TB/s of L2 read demand (≈600 TFLOPS at this tile). See report §16 |
 | `CFG_CLUSTER_MIN_TM` | 32 | …and it needs enough M-tiles for the multicast to be reused. At K=2048 the cluster is **+7.6%** on `32k×8k×2k` (tiles_m=256) and **−8.4%** on `2k×2k×2k` (tiles_m=16) |
 | `CFG_CLUSTER_NARROW_N` | 4 | override: with few N-tiles B is re-read per M-row, so the multicast pays regardless of K (`3000×1000×2000` loses 14.6pp without it) |
 | `CFG_CONSUMER_REGS` | 232 | consumer warpgroup register budget |
