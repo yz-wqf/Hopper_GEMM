@@ -5,8 +5,8 @@ description: Optimize a dense GEMM (or GEMM-like tensor-core kernel) on NVIDIA H
 
 # Hopper GEMM Optimization — from first principles to ahead of cuBLAS
 
-Derived from taking an FP16 GEMM from 744 → 902 TFLOPS peak on H100 SXM5 80 GB (19/31 shapes
-at or above cuBLAS 12.9, at or above a tuned CUTLASS 4.7 on 17 of the 27 shapes it supports, up to
+Derived from taking an FP16 GEMM from 744 → 918 TFLOPS peak on H100 SXM5 80 GB (22/31 shapes
+at or above cuBLAS 12.9, at or above a per-shape-tuned CUTLASS 4.7 on 14 of the 27 shapes it supports, up to
 92% of the 989.4 TFLOPS hardware peak). Numbers measured at H100 @ 1980 MHz, CUDA 12.9.
 Treat them as *orders of magnitude and orderings*, not universal constants.
 
@@ -545,8 +545,17 @@ identical. Use a sentinel (`0` = auto) that cannot collide with a legal value.
 ## Step 11: Cross-check against CUTLASS
 
 Build the same contract from CUTLASS `CollectiveBuilder` primitives as an independent check.
-Result (after tuning both): **at or above CUTLASS on 17 of the 27 shapes it supports**, typical
-margin 1.00–1.11×; CUTLASS is bit-exact against cuBLAS on every one.
+Result (after tuning both **per shape**): **at or above CUTLASS on 14 of the 27 shapes it
+supports**, typical margin 1.00–1.13×; CUTLASS is bit-exact against cuBLAS on every one.
+
+**Give it the same tuning freedom your dispatcher has, or your score is fiction.** A kernel
+that picks from a three-rung tile ladder at runtime, compared against CUTLASS pinned to two
+tiles, measures your dispatcher. Sweeping tile × cluster × schedule × swizzle per shape moved
+one comparison **20/27 → 17/27 → 14/27** across three harness generations — every correction
+in the same direction, which is what a systematically favourable setup looks like.
+`128×128×64` **pingpong** turned out to be CUTLASS's best config on essentially every thin-K
+shape: a schedule that had been dismissed on a single measurement at 1024³, where it is 5.5%
+worse. Third time in this project that tuning on one shape produced a wrong general rule.
 
 **Tune its tile scheduler, not just its tile.** `max_swizzle_size` defaults to **1** — no
 threadblock swizzle at all. Against a kernel with a GROUP_M rasterization policy that is not

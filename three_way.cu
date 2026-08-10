@@ -11,6 +11,8 @@ namespace h100_hgemm_cutlass {
 bool supported(int, int, int);
 bool launch(const half *, const half *, half *, int, int, int, float, float, cudaStream_t);
 void set_swizzle(int);
+void set_config(int);
+int num_configs();
 }
 static cublasHandle_t H;
 static double med(std::vector<double> v){std::sort(v.begin(),v.end());return v[v.size()/2];}
@@ -26,7 +28,11 @@ int main(int argc,char**argv){
     half *A,*B,*C,*R;
     if(cudaMalloc(&A,(size_t)M*K*2)||cudaMalloc(&B,(size_t)K*N*2)||
        cudaMalloc(&C,(size_t)M*N*2)||cudaMalloc(&R,(size_t)M*N*2)) continue;
-    // correctness check for CUTLASS on this shape (random data, vs cuBLAS)
+    // correctness check for CUTLASS on this shape (random data, vs cuBLAS).
+    // Reset the swept state first: otherwise this inherits the previous shape's winning
+    // config, which may not even be implementable here -- launch() then returns false, C is
+    // left as memset, and the shape reports a spurious FAIL.
+    h100_hgemm_cutlass::set_config(-1); h100_hgemm_cutlass::set_swizzle(1);
     char verdict[24]="skipped (N%8/K%8)";
     if(cut_ok){
       std::vector<half> hA((size_t)M*K),hB((size_t)K*N);
@@ -60,24 +66,41 @@ int main(int argc,char**argv){
     // scheduler default is no swizzle at all, which is not a fair baseline against a
     // kernel that rasterizes for L2 (23% at 16384^3), and a fixed cap is an overfit the
     // other way (-38% on 384x2048x2048).
-    // CUTLASS's tile scheduler defaults to max_swizzle_size=1 -- no threadblock swizzle at
-    // all -- which is not a fair baseline against a kernel that rasterizes for L2 (worth
-    // 23% to CUTLASS at 16384^3). A fixed cap overfits the other way (-38% on
-    // 384x2048x2048), so sweep it per shape and keep the winner.
+    // CUTLASS gets the same freedom the hand-written dispatcher has: a tile ladder
+    // (256/128/64), both schedules, and a threadblock swizzle -- all swept per shape, best
+    // kept. Giving it only two tiles and no swizzle was not a like-for-like test: the
+    // scheduler default alone was worth 23% at 16384^3, and adding the 128x128 rung plus
+    // the pingpong schedule flips 6 of the 10 shapes we previously claimed by >5%.
     //
-    // The discovery pass is deliberately cheap: 2 warmup + 1x5 timed per candidate, ~28
-    // launches against ~260 for a full timing. A full-weight sweep here left the GPU hot
-    // enough to cost cuBLAS 15% at 4096^3 (877 -> 763). Do NOT "fix" that with a settle
-    // sleep: at 1024^3 the measurement is microseconds, the clocks never re-boost after an
-    // idle gap, and cuBLAS reads 191 instead of 308.
-    int best_sw=1;
-    if(cut_ok){ double bv=0.0;
-      for(int sw : {1,2,4,8}){ h100_hgemm_cutlass::set_swizzle(sw);
-        double v=time_n(cut,2,1,5); if(v>bv){bv=v;best_sw=sw;} }
-      h100_hgemm_cutlass::set_swizzle(best_sw); }
+    // The discovery pass is deliberately cheap: 2 warmup + 1x5 timed per candidate. A
+    // full-weight sweep here left the GPU hot enough to cost cuBLAS 15% at 4096^3
+    // (877 -> 763). Do NOT "fix" that with a settle sleep: at 1024^3 the measurement is
+    // microseconds, clocks never re-boost after an idle gap, and cuBLAS reads 191 vs 308.
+    int best_sw=1, best_cfg=0;
+    if(cut_ok){
+      auto probe=[&](int cf,int sw)->double{
+        h100_hgemm_cutlass::set_config(cf); h100_hgemm_cutlass::set_swizzle(sw);
+        // launch() returns false when can_implement rejects the config. Without this check
+        // the "kernel" costs ~0 and the sweep crowns an unusable config with a fabricated
+        // TFLOPS number.
+        if(!h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0)) return -1;
+        cudaDeviceSynchronize(); return time_n(cut,2,1,3); };
+      // Two stages, not a full cross-product: pick the config at swizzle 1, then sweep the
+      // swizzle for the winner. 11 candidates instead of 28. The full cross-product is
+      // ~224 launches, enough to heat the GPU and depress the measurement that follows
+      // (4096^3 read 825 for us against its 863 baseline).
+      double bv=-1;
+      for(int cf=0; cf<h100_hgemm_cutlass::num_configs(); ++cf){
+        double v=probe(cf,1); if(v>bv){bv=v;best_cfg=cf;} }
+      for(int sw : {2,4,8}){ double v=probe(best_cfg,sw); if(v>bv){bv=v;best_sw=sw;} }
+      h100_hgemm_cutlass::set_config(best_cfg);
+      h100_hgemm_cutlass::set_swizzle(best_sw);
+      // Re-verify with the config that will actually be timed, not just the default one.
+      if(!h100_hgemm_cutlass::launch(A,B,C,M,N,K,al,be,0))
+        snprintf(verdict,sizeof verdict,"UNUSABLE cfg%d",best_cfg); }
     double o=time(ours), c=cut_ok?time(cut):0.0, b=time(cb);
     char nm[48]; snprintf(nm,sizeof nm,"%lldx%lldx%lld",M,N,K);
-    if(cut_ok) printf("%-18s %9.1f %9.1f %9.1f %7.2fx %7.2fx  sw=%d %s\n",nm,o,c,b,o/c,o/b,best_sw,verdict);
+    if(cut_ok) printf("%-18s %9.1f %9.1f %9.1f %7.2fx %7.2fx  c%d/sw%d %s\n",nm,o,c,b,o/c,o/b,best_cfg,best_sw,verdict);
     else       printf("%-18s %9.1f %9s %9.1f %8s %7.2fx  %s\n",nm,o,"n/a",b,"n/a",o/b,verdict);
     cudaFree(A);cudaFree(B);cudaFree(C);cudaFree(R);
   }

@@ -83,7 +83,8 @@ using EpiSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
 // The SASS then fences and *fully drains* around every single wgmma
 // (WARPGROUP.DEPBAR.LE gsb0, 0x0 after each HGMMA) instead of keeping one group in flight,
 // costing ~10% at 4096^3 and ~2x at 1024^3.
-template <class TileShape_, class ClusterShape_>
+template <class TileShape_, class ClusterShape_,
+          class KernelSchedule_ = cutlass::gemm::KernelTmaWarpSpecializedCooperative>
 struct Cfg {
   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
       cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape_, ClusterShape_,
@@ -95,18 +96,32 @@ struct Cfg {
       LayoutB, Align, ElementAcc, TileShape_, ClusterShape_,
       cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
           sizeof(typename CollectiveEpilogue::SharedStorage))>,
-      cutlass::gemm::KernelTmaWarpSpecializedCooperative>::CollectiveOp;
+      KernelSchedule_>::CollectiveOp;
 
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>,
                                                           CollectiveMainloop, CollectiveEpilogue>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 };
 
+// The hand-written kernel picks from a three-rung tile ladder (BN 256/128/64) with a
+// per-shape GROUP_M policy. Giving CUTLASS only two rungs was not a like-for-like test:
+// with the middle rung and the pingpong schedule added, CUTLASS wins 6 of the 10 shapes
+// where we previously claimed >5%. Notably 128x128x64 pingpong is the best config on every
+// thin-K shape -- a schedule dismissed earlier on the strength of a single measurement at
+// 1024^3, where it happens to be 5.5% worse.
+//
 // Cluster 2x1, not 1x2: 1x2 measured 1.4% better at 4096^3 but 1.6x WORSE at 16384^3
 // (429 vs 693 TFLOPS). Tuning on one shape and generalising is how that nearly shipped.
-using Large = Cfg<Shape<_128, _256, _64>, Shape<_2, _1, _1>>;
-using Small = Cfg<Shape<_128, _64, _64>, Shape<_1, _1, _1>>;
-using Gemm = typename Large::Gemm;   // stride types are identical across configs
+using Ping = cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+using C0 = Cfg<Shape<_128, _256, _64>, Shape<_2, _1, _1>>;         // wide, clustered
+using C1 = Cfg<Shape<_128, _256, _64>, Shape<_1, _1, _1>>;
+using C2 = Cfg<Shape<_128, _128, _64>, Shape<_2, _1, _1>>;         // middle rung
+using C3 = Cfg<Shape<_128, _128, _64>, Shape<_1, _1, _1>>;
+using C4 = Cfg<Shape<_128, _128, _64>, Shape<_1, _1, _1>, Ping>;   // best on thin K
+using C5 = Cfg<Shape<_128, _64, _64>, Shape<_1, _1, _1>>;          // narrow
+using C6 = Cfg<Shape<_128, _64, _64>, Shape<_1, _1, _1>, Ping>;
+static constexpr int kNumConfigs = 7;
+using Gemm = typename C0::Gemm;   // stride types are identical across configs
 
 using StrideA = typename Gemm::GemmKernel::StrideA;
 using StrideB = typename Gemm::GemmKernel::StrideB;
@@ -146,6 +161,12 @@ bool supported(int M, int N, int K) {
 // 1 == CUTLASS's default, i.e. no swizzle.
 static int g_cutlass_swizzle = 1;
 void set_swizzle(int s) { g_cutlass_swizzle = s; }
+
+// Config index, swept by the harness alongside the swizzle. -1 == the built-in two-rung
+// heuristic, which is what a caller who does not tune would get.
+static int g_cutlass_config = -1;
+void set_config(int c) { g_cutlass_config = c; }
+int num_configs() { return kNumConfigs; }
 
 bool launch(const half *A, const half *B, half *C, int M, int N, int K, float alpha, float beta,
             cudaStream_t stream) {
@@ -193,7 +214,18 @@ bool launch(const half *A, const half *B, half *C, int M, int N, int K, float al
     if (op.initialize(a, ws, stream) != cutlass::Status::kSuccess) return false;
     return op.run(stream) == cutlass::Status::kSuccess;
   };
-  return use_large ? run(Large{}) : run(Small{});
+  if (g_cutlass_config >= 0) {
+    switch (g_cutlass_config) {
+      case 0: return run(C0{});
+      case 1: return run(C1{});
+      case 2: return run(C2{});
+      case 3: return run(C3{});
+      case 4: return run(C4{});
+      case 5: return run(C5{});
+      default: return run(C6{});
+    }
+  }
+  return use_large ? run(C0{}) : run(C5{});
 }
 
 }  // namespace h100_hgemm_cutlass

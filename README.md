@@ -5,8 +5,9 @@
 Single-file kernel (`mma_half.cu`) targeting sm_90a: TMA + `wgmma` + warp specialization +
 2-CTA clusters + persistent grid + TMA-store epilogue, with a per-shape tile dispatcher.
 
-**19 of 31 shapes at ≥1.00× cuBLAS 12.9, and ≥ a tuned CUTLASS 4.7 on 17 of the 27 shapes
-CUTLASS supports.** 80–91% of the 989.4 TFLOPS hardware peak on large shapes. Full table below.
+**22 of 31 shapes at ≥1.00× cuBLAS 12.9, and ≥ a per-shape-tuned CUTLASS 4.7 on 14 of the 27
+shapes CUTLASS supports.** 80–93% of the 989.4 TFLOPS hardware peak on large shapes.
+Full table below.
 
 | document | |
 |---|---|
@@ -38,48 +39,58 @@ Regenerate with `make perf` (`perf_all` for the cuBLAS table, `three_way` for th
 |---|---|---|---|---|---|
 | 4k×4095×4k | **501** | n/a | 145 | — | **3.45×** |
 | 4095×4095×4095 | **436** | n/a | 155 | — | **2.81×** |
-| 2k×2047×2k | **311** | n/a | 147 | — | **2.11×** |
-| 1k×1023×1k | **138** | n/a | 71 | — | **1.94×** |
-| 4k×4k×8k | **902** | 836 | 784 | **1.08×** | **1.15×** |
-| 8k×8k×2k | **842** | 755 | 742 | **1.11×** | **1.13×** |
-| 1k×1k×1k | **326** | 294 | 303 | **1.11×** | **1.08×** |
-| 8k×8k×128 | **306** | 286 | 288 | **1.07×** | **1.06×** |
-| 8k×8k×16k | **838** | 838 | 793 | **1.00×** | **1.06×** |
-| 4k×8k×128 | **283** | 262 | 269 | **1.08×** | **1.05×** |
-| 16k×16k×16k | **846** | 847 | 806 | 1.00× | **1.05×** |
-| 16k×8k×128 | **312** | 306 | 303 | **1.02×** | **1.03×** |
-| 8k×8k×4k | **822** | 776 | 802 | **1.06×** | **1.02×** |
-| 8k×8k×8k | **813** | 826 | 795 | 0.98× | **1.02×** |
-| 16k×4k×8k | **812** | 826 | 793 | 0.98× | **1.02×** |
-| 16k×8k×4k | **796** | 818 | 782 | 0.97× | **1.02×** |
-| 4k×8k×256 | **472** | 410 | 468 | **1.15×** | **1.01×** |
-| 4k×8k×8k | **826** | 758 | 823 | **1.09×** | **1.00×** |
-| 8k×4k×8k | **838** | 780 | 837 | **1.07×** | **1.00×** |
-| 4k×8k×512 | 608 | 572 | 610 | **1.06×** | 1.00× |
-| 4k×4k×4k | 864 | 858 | 870 | **1.01×** | 0.99× |
-| 32k×8k×2k | 782 | 785 | 789 | 1.00× | 0.99× |
-| 8k×1k×8k | 886 | 890 | 898 | 1.00× | 0.99× |
-| 8k×8k×1k | 760 | 731 | 773 | **1.04×** | 0.98× |
-| 4k×4k×1k | 693 | 675 | 706 | **1.03×** | 0.98× |
-| 4k×8k×1k | 736 | 714 | 755 | **1.03×** | 0.97× |
-| 384×2k×2k | 337 | 339 | 352 | 0.99× | 0.96× |
-| 3000×1000×2000 | 464 | 469 | 493 | 0.99× | 0.94× |
-| 2k×2k×2k | 672 | 692 | 722 | 0.97× | 0.93× |
-| 2k×2k×512 | 363 | 387 | 429 | 0.94× | 0.85× |
-| 4k×512×4k | 559 | 557 | 693 | **1.00×** | 0.81× |
+| 2k×2047×2k | **310** | n/a | 147 | — | **2.11×** |
+| 1k×1023×1k | **138** | n/a | 72 | — | **1.92×** |
+| 4k×4k×8k | **902** | 867 | 798 | **1.04×** | **1.13×** |
+| 8k×8k×2k | **842** | 823 | 755 | **1.02×** | **1.12×** |
+| 4k×8k×8k | **918** | 816 | 824 | **1.13×** | **1.11×** |
+| 8k×8k×16k | **846** | 838 | 788 | **1.01×** | **1.07×** |
+| 8k×4k×8k | **880** | 802 | 824 | **1.10×** | **1.07×** |
+| 1k×1k×1k | **326** | 294 | 306 | **1.11×** | **1.07×** |
+| 8k×8k×128 | **304** | 305 | 288 | 1.00× | **1.06×** |
+| 4k×8k×128 | **283** | 274 | 269 | **1.03×** | **1.05×** |
+| 16k×16k×16k | **845** | 846 | 806 | 1.00× | **1.05×** |
+| 8k×8k×8k | **830** | 835 | 793 | 0.99× | **1.05×** |
+| 32k×8k×2k | **810** | 790 | 785 | **1.03×** | **1.03×** |
+| 16k×8k×4k | **811** | 812 | 787 | 1.00× | **1.03×** |
+| 8k×8k×4k | **840** | 772 | 816 | **1.09×** | **1.03×** |
+| 16k×4k×8k | **820** | 828 | 796 | 0.99× | **1.03×** |
+| 16k×8k×128 | **312** | 326 | 303 | 0.96× | **1.03×** |
+| 8k×8k×1k | **761** | 730 | 750 | **1.04×** | **1.02×** |
+| 4k×8k×256 | **473** | 476 | 469 | 0.99× | **1.01×** |
+| 384×2k×2k | **350** | 339 | 350 | **1.03×** | **1.00×** |
+| 8k×1k×8k | 886 | 888 | 887 | 1.00× | 1.00× |
+| 4k×8k×512 | 609 | 673 | 611 | 0.90× | 1.00× |
+| 4k×4k×4k | 864 | 857 | 870 | **1.01×** | 0.99× |
+| 4k×4k×1k | 692 | 675 | 705 | **1.03×** | 0.98× |
+| 4k×8k×1k | 735 | 714 | 754 | **1.03×** | 0.97× |
+| 3000×1000×2000 | 461 | 466 | 491 | 0.99× | 0.94× |
+| 2k×2k×2k | 674 | 700 | 725 | 0.96× | 0.93× |
+| 2k×2k×512 | 362 | 396 | 428 | 0.91× | 0.85× |
+| 4k×512×4k | 565 | 687 | 697 | 0.82× | 0.81× |
 
-**31 shapes — ours ≥ cuBLAS on 19; ours ≥ CUTLASS on 17 of 27 supported.**
+**31 shapes — ours ≥ cuBLAS on 22; ours ≥ CUTLASS on 14 of 27 supported.**
 
 Rows within ~1% of each other are inside the run-to-run band on this machine: large shapes
 drift ±50–100 TFLOPS between runs depending on clocks. Treat `0.99×`–`1.01×` as a tie and
 only the ≥1.05× and ≤0.95× entries as decided. The medians above are over 3 serial runs.
 
-Large shapes run **80–91% of the 989.4 TFLOPS** hardware peak — best single figure is
-4096×4096×8192 at 902 TFLOPS (91.2% of peak), with 4096³ at 864 (87.3%).
+Large shapes run **80–93% of the 989.4 TFLOPS** hardware peak — best single figure is
+4096×8192×8192 at 918 TFLOPS (92.8% of peak), with 4096³ at 864 (87.3%).
 
 **On the CUTLASS column.** CUTLASS's device API fixes the tile per instantiation — there is no
 runtime tile heuristic (that is what its offline profiler is for) — so it gets the same two-rung
 dispatch ours has, with configurations chosen by sweeping tile × cluster × kernel schedule.
+
+**It gets the same tuning freedom our dispatcher has.** Our kernel picks from a three-rung
+tile ladder (BN 256/128/64) with a per-shape GROUP_M policy. Giving CUTLASS two fixed tiles
+was not a like-for-like test. It now gets seven configs — 128×256/128×128/128×64, clustered
+and not, cooperative and pingpong — swept per shape together with the swizzle, best kept
+(the `c<n>/sw<n>` column in `make cutlass`). That is what its offline profiler does.
+
+Adding the middle rung and the pingpong schedule flipped **6 of the 10 shapes** we previously
+claimed by >5%; `128×128×64` pingpong is the best CUTLASS config on nearly every thin-K
+shape. Four >5% wins survive: `4k×8k×8k`, `1024³`, `8k×4k×8k`, `8k×8k×4k`.
 
 **Its tile scheduler must be told to rasterize.** `max_swizzle_size` defaults to **1** —
 no threadblock swizzle at all — which is not a fair baseline against a kernel that rasterizes
