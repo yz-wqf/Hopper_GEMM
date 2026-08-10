@@ -1574,6 +1574,42 @@ the symptom — §14 measures the actual cause as a fixed ~1.38 µs per-CTA prol
 
 ---
 
+### Rejected: `CLUSTER_M = 4`
+
+If multicast is the cluster's only benefit, a 4-CTA cluster should save **3/4** of B's L2->SM
+traffic instead of 1/2, and `BLOCKS = BN/64 = 4` makes it legal at BN=256. It is far worse:
+
+| shape | CM=2 | CM=4 | |
+|---|---|---|---|
+| 32768x8192x2048 | 734.3 | 426.6 | **-41.9%** |
+| 16384x16384x16384 | 695.3 | 436.2 | -37.3% |
+| 8192x1024x8192 | 649.1 | 421.3 | -35.1% |
+| 8192x8192x4096 | 668.5 | 457.2 | -31.6% |
+| 8192x8192x8192 | 505.5 | 453.1 | -10.4% |
+| 4096x4096x4096 | 525.6 | 477.7 | -9.1% |
+
+(5 process-level alternations, medians; `CLUSTER_M` is compile-time so the builds cannot be
+interleaved in-process.)
+
+The sign was predictable from where the synchronisation lives. `release_stage` sits **inside
+the k-tile loop** and issues `CLUSTER_M` remote `mbarrier` arrivals through
+`mapa.shared::cluster`, and `bar_empty` must collect `CONSUMERS * CLUSTER_M` of them. So both
+sides scale per k-tile, and they scale differently:
+
+```
+  benefit / k-tile  ~  (1 - 1/CM) * B_bytes      CM=2: 1/2   CM=4: 3/4    (x1.5)
+  sync cost / k-tile ~  CM remote arrivals       CM=2: 2     CM=4: 4      (x2.0)
+```
+
+Cost grows faster than benefit, so CM=4 should lose. **But it loses far more than that
+arithmetic predicts** (-42%, not -10..20%), so something else is also paying: most likely
+scheduling, since a 4-CTA cluster must be co-resident within one GPC and halves the number of
+independent clusters from 66 to 33, shrinking the pool of work available to hide latency.
+
+Worth stating plainly because it is the general shape of the trade: **the cluster buys L2->SM
+bandwidth and pays in synchronisation and scheduling freedom.** Two CTAs is where that came
+out ahead here; it is not a knob to turn up.
+
 ## Rejected optimizations
 
 Recorded because the reasoning is worth as much as the wins.

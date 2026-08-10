@@ -523,6 +523,21 @@ K alone does not separate — at K=2048 it is +7.6% at tiles_m=256 and −8.4% a
 narrow-N override matters: with few N-tiles B is re-read once per M-row, so halving it pays
 regardless of K (one shape lost 14.6pp without it).
 
+**Do not turn the cluster up.** If multicast is the benefit, `CLUSTER_M=4` should save 3/4 of
+B's L2→SM traffic instead of 1/2. Measured: **−9% to −42%** across six shapes. Check where the
+synchronisation lives before assuming it amortises — if the release sits inside the k-tile loop
+and issues `CLUSTER_M` remote arrivals, both sides scale per k-tile and the cost scales faster:
+
+```
+  benefit / k-tile  ~ (1 - 1/CM)·B_bytes    CM=2: 1/2   CM=4: 3/4   (×1.5)
+  sync cost / k-tile ~ CM remote arrivals    CM=2: 2     CM=4: 4     (×2.0)
+```
+
+That predicts the sign but badly understates the magnitude, so a second cost is also in play —
+a 4-CTA cluster must be GPC-co-resident and halves the count of independent clusters (66 → 33),
+shrinking the pool of work available to hide latency. **The cluster buys L2→SM bandwidth and
+pays in synchronisation and scheduling freedom.**
+
 **Re-derive every tuned constant when you fix your measurement setup.** A GROUP_M policy
 fitted under memset data + hot L2 + sequential timing was wrong once all three were corrected:
 `K<=512 -> GROUP_M=4` should have been `1` for short-K and small-grid shapes, worth **+19%** on
